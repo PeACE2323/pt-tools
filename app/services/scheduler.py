@@ -185,12 +185,12 @@ class GuardScheduler:
             coalesce=True,
             misfire_grace_time=30,
         )
-        # BT 子服务存活看护：每 30 秒探测，异常按退避重启
+        # PT 流量采集与策略求值：每 30 秒一轮
         self.scheduler.add_job(
-            self.watch_btguard,
+            self.poll_pt_traffic,
             trigger=IntervalTrigger(seconds=30),
-            id="watch_btguard",
-            name="BT 子服务看护",
+            id="poll_pt_traffic",
+            name="PT 流量采集",
             max_instances=1,
             coalesce=True,
             misfire_grace_time=20,
@@ -1092,40 +1092,32 @@ class GuardScheduler:
             logger.warning("数据清理失败: %s", exc)
 
     # ======================================================================
-    # 定时健康检查
+    # PT 流量采集
     # ======================================================================
-    async def watch_btguard(self) -> None:
-        """PT 流量子服务的存活看护 + 事件汇入。
+    async def poll_pt_traffic(self) -> None:
+        """采集一轮 PT 流量并求值限速策略。
 
-        两件事：
+        原先这里是对 Go 子进程的存活看护；整合后完全由本进程执行：
 
-        1. **存活看护**：Go 子进程可能因内存、配置错误等原因退出，
-           异常时按退避重启（逻辑在 ``BTGuardManager`` 内部）。
-        2. **事件汇入**：把 Go 侧产生的策略事件（触发限速 / 解除限速）
-           写进 PTtools 统一的事件日志表，让用户在侧边栏「事件日志」
-           一处就能看到全部事件，而不必去两个地方翻。
+        1. 并发采集所有已配置下载器的速率与累计上传量
+        2. 用策略引擎判断是否达到阈值 → 下发限速
+        3. 把策略事件汇入统一事件日志
         """
         try:
-            from .btguard import get_btg_manager
+            from .bt_monitor import get_pt_monitor
 
-            mgr = get_btg_manager()
-            if not mgr.enabled:
+            monitor = get_pt_monitor()
+            if not monitor.client_names and not monitor.engine.configs():
                 return
-            await mgr.probe_and_maybe_restart()
+            await monitor.poll_once()
+            self._import_pt_events(monitor)
+        except Exception as exc:  # noqa: BLE001 - 采集失败不影响主流程
+            logger.debug("PT 采集异常: %s", exc)
 
-            if mgr.status.running:
-                await self._import_pt_events(mgr)
-        except Exception as exc:  # noqa: BLE001 - 看护失败不影响主流程
-            logger.debug("PT 子服务看护异常: %s", exc)
-
-    async def _import_pt_events(self, mgr) -> None:
-        """把 Go 侧新增的策略事件写入统一事件日志。
-
-        去重：用事件的时间 + 类型 + 策略名做签名，已导入过的跳过。
-        Go 侧最多保留有限条事件，所以维护一个有界的签名集合即可。
-        """
+    def _import_pt_events(self, monitor) -> None:
+        """把新增的策略事件写入统一事件日志（按时间去重）。"""
         try:
-            events = await mgr.fetch_events(50)
+            events = monitor.events(50)
         except Exception:  # noqa: BLE001
             return
         if not events:
@@ -1135,7 +1127,6 @@ class GuardScheduler:
             self._pt_seen_events: set[str] = set()
         seen = self._pt_seen_events
 
-        # 按时间正序处理，保证日志顺序自然
         for ev in reversed(events):
             key = "{}|{}|{}".format(
                 ev.get("time", ""), ev.get("type", ""), ev.get("policy", "")
@@ -1147,7 +1138,7 @@ class GuardScheduler:
             etype = str(ev.get("type", ""))
             message = str(ev.get("message", "")) or f"PT 策略事件: {etype}"
             level = "info"
-            if "limit" in etype or "trigger" in etype:
+            if etype == "limit":
                 level = "warning"
             elif "error" in etype or "fail" in etype:
                 level = "error"
@@ -1155,13 +1146,12 @@ class GuardScheduler:
             detail = (
                 f"policy={ev.get('policy', '')} "
                 f"clients={','.join(ev.get('clients') or [])} "
-                f"window_bytes={ev.get('window_bytes', 0)} "
+                f"used={ev.get('used', 0)} "
                 f"threshold={ev.get('threshold', 0)} "
-                f"limit={ev.get('old_limit', 0)}->{ev.get('new_limit', 0)}"
+                f"limit={ev.get('new_limit', 0)}"
             )
             log_event(level, "pt-traffic", message, detail=detail)
 
-        # 有界，避免长期运行时无限增长
         if len(seen) > 2000:
             self._pt_seen_events = set(list(seen)[-1000:])
 

@@ -19,10 +19,9 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .api import btguard, dashboard, p115, pt, rules, settings, tasks, webhook
+from .api import dashboard, p115, pt, rules, settings, tasks, webhook
 from .config import STATIC_DIR
 from .models import init_db
-from .services.btguard import get_btg_manager
 from .services.scheduler import get_scheduler
 from .utils import get_logger, log_event, setup_logging
 
@@ -51,17 +50,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.exception("调度器启动失败")
         log_event("error", "system", "调度器启动失败", detail=str(exc))
 
-    # 3) 拉起 BT 流量监控子服务（Go 二进制）
+    # 3) 初始化 PT 流量监控（读取已保存的下载器与策略）
     #    失败不阻断启动：CD2/115 功能应照常可用
-    btg = get_btg_manager()
     try:
-        if await btg.start():
-            logger.info("BT 流量子服务已拉起")
-        else:
-            logger.warning("BT 流量子服务未启动: %s", btg.status.last_error)
+        from .services.bt_monitor import get_pt_monitor
+
+        await get_pt_monitor().reload()
+        logger.info("PT 流量监控已就绪")
     except Exception as exc:  # noqa: BLE001
-        logger.exception("BT 流量子服务启动异常")
-        log_event("error", "system", "BT 子服务启动异常", detail=str(exc))
+        logger.exception("PT 流量监控初始化失败")
+        log_event("error", "system", "PT 监控初始化失败", detail=str(exc))
 
     logger.info("服务已就绪")
 
@@ -69,12 +67,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         logger.info("正在关闭 ...")
-        # 先停 BT 子服务：它会在这时「恢复上传限速」，
-        # 若被强制结束，下载器可能永久停留在限速状态
+        # 退出前必须解除所有限速：
+        # 否则下载器会永久停留在限速状态，用户下次启动时
+        # 会发现上传异常慢却不知道为什么。原 Go 子服务也是这样做的。
         try:
-            await btg.close()
+            from .services.bt_monitor import get_pt_monitor
+
+            monitor = get_pt_monitor()
+            for state in monitor.engine.states():
+                if state.limited:
+                    try:
+                        await monitor.engine.force_resume(state.name, monitor._clients)  # noqa: SLF001
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("解除策略 %s 限速失败: %s", state.name, exc)
+            await monitor.close()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("BT 子服务关闭异常: %s", exc)
+            logger.warning("PT 监控关闭异常: %s", exc)
         try:
             await scheduler.shutdown()
         except Exception as exc:  # noqa: BLE001
@@ -131,9 +139,8 @@ app.include_router(tasks.router)
 app.include_router(p115.router)
 app.include_router(settings.router)
 app.include_router(webhook.router)
-# PT 流量监控：原生数据接口（/api/pt/*）+ 保留 Go 面板直连（/btg/*）
+# PT 流量监控：完全由 Python 实现，无子进程、无反代
 app.include_router(pt.router)
-app.include_router(btguard.router)
 
 
 # ===========================================================================

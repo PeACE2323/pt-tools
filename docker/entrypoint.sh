@@ -77,14 +77,8 @@ else
   echo "[entrypoint] proto 生成代码已就绪"
 fi
 
-# ---- BT 流量子服务（Go 二进制）检查 ----
-BTG_BIN="${BTG_BINARY:-/app/btguard-bin/bt-traffic-guard}"
-if [ -x "${BTG_BIN}" ]; then
-  echo "[entrypoint] BT 子服务 : $("${BTG_BIN}" -version 2>&1 | head -n1)"
-else
-  echo "[entrypoint] !! 未找到 BT 子服务二进制 (${BTG_BIN})" >&2
-  echo "[entrypoint] !! BT 流量监控功能将不可用，其余功能正常" >&2
-fi
+# ---- PT 流量监控：纯 Python 实现，无需额外二进制 ----
+echo "[entrypoint] PT 流量监控 : 内置模块（无需子进程）"
 
 # ---- 数据库路径兜底 ----
 export GUARD_DB_PATH="${GUARD_DB_PATH:-${DATA_DIR}/guard.db}"

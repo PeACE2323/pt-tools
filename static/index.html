@@ -220,7 +220,7 @@
             </template>
             <div v-else class="text-center py-6">
               <div class="text-sm text-slate-400 mb-2">
-                {{ dash.pt?.available ? '子服务未运行' : '尚未启用' }}
+                {{ dash.pt?.configured ? '尚未采集到数据' : '尚未配置' }}
               </div>
               <button @click="switchTab('settings')"
                 class="text-xs text-sky-600 hover:underline">去配置 →</button>
@@ -740,23 +740,17 @@
 
       <!-- ============ PT 策略（流量监控） ============ -->
       <div v-if="tab==='pt'" class="space-y-5">
-        <!-- 子服务异常提示 -->
-        <div v-if="!pt.running"
-          :class="['rounded-lg p-4 text-sm border',
-            pt.available ? 'bg-rose-50 border-rose-200 text-rose-800'
-                         : 'bg-amber-50 border-amber-200 text-amber-800']">
-          <div class="font-medium mb-1">
-            {{ pt.available ? 'PT 流量子服务未运行' : 'PT 流量监控不可用' }}
-          </div>
-          <p class="text-xs leading-relaxed break-all">{{ pt.last_error || '未配置或尚未启动' }}</p>
-          <div class="flex gap-2 mt-2">
-            <button @click="restartPt()" :disabled="ptBusy"
-              class="px-3 py-1.5 bg-white border rounded text-xs disabled:opacity-50">
-              {{ ptBusy ? '处理中…' : '尝试启动' }}
-            </button>
-            <button @click="switchTab('settings')"
-              class="px-3 py-1.5 bg-white border rounded text-xs">去配置</button>
-          </div>
+        <!-- 未配置提示 -->
+        <div v-if="!pt.client_count && !pt.policy_count"
+          class="bg-sky-50 border border-sky-200 rounded-lg p-4 text-sm text-sky-800">
+          <div class="font-medium mb-1">还没有配置下载器</div>
+          <p class="text-xs leading-relaxed">
+            先在「系统设置 → PT 流量监控」里添加 qBittorrent / Transmission，
+            再回到这里创建限速策略。
+          </p>
+          <p v-if="pt.last_error" class="text-xs text-rose-600 mt-1 break-all">{{ pt.last_error }}</p>
+          <button @click="switchTab('settings')"
+            class="mt-2 px-3 py-1.5 bg-white border border-sky-300 rounded text-xs">去配置</button>
         </div>
 
         <template v-else>
@@ -1095,19 +1089,12 @@
             PT 流量监控
             <span v-if="pt.running"
               class="text-[11px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-normal">运行中</span>
-            <span v-else-if="pt.available"
-              class="text-[11px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-normal">未运行</span>
             <span v-else
-              class="text-[11px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 font-normal">不可用</span>
+              class="text-[11px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 font-normal">未配置</span>
           </h3>
           <p class="text-xs text-slate-500 mb-3 leading-relaxed">
             配置要监控的下载器。<strong>限速策略</strong>在左侧「PT 策略」页单独维护。
           </p>
-
-          <div v-if="!pt.available"
-            class="mb-3 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
-            当前环境未包含 PT 子服务二进制（源码方式运行时会这样）。用 Docker 镜像部署即可获得完整功能。
-          </div>
 
           <!-- 下载器列表 -->
           <div v-if="pt.running" class="space-y-3">
@@ -1204,13 +1191,6 @@
               class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs disabled:opacity-50">
               重新加载
             </button>
-            <button @click="restartPt()" :disabled="ptBusy"
-              class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs disabled:opacity-50">
-              {{ ptBusy ? '重启中…' : '重启子服务' }}
-            </button>
-            <div class="flex-1"></div>
-            <a href="/btg/" target="_blank" rel="noopener"
-               class="px-3 py-1.5 text-sky-600 hover:underline text-xs">原始面板 ↗</a>
           </div>
         </div>
 
@@ -1558,7 +1538,6 @@ createApp({
     });
     const clients = ref([]);
     const policies = ref([]);
-    const ptBusy = ref(false);
     const ptTesting = ref('');
     // ---- PT 下载器配置（系统设置页）----
     // 用结构化表单而非 YAML 文本：字段类型明确、有校验、不会写错缩进。
@@ -1831,20 +1810,6 @@ createApp({
         showToast('测试失败：' + e.message, 'error');
       } finally {
         ptTesting.value = '';
-      }
-    };
-
-    const restartPt = async () => {
-      ptBusy.value = true;
-      try {
-        const r = await api('POST', '/api/btg/restart');
-        showToast(r.message || (r.ok ? '已启动' : '启动失败'), r.ok ? 'success' : 'error');
-        // 子服务需要几秒初始化
-        setTimeout(() => loadPt(), 3000);
-      } catch (e) {
-        showToast('启动失败：' + e.message, 'error');
-      } finally {
-        ptBusy.value = false;
       }
     };
 
@@ -2528,8 +2493,8 @@ body = '''
       rules, liveTasks, instantPage, nonInstantPage, offlineTasks, cancelLogsPage,
       events, settings, form, p115Config, taskTab, p115Tab, taskSubTabs, p115SubTabs,
       logLevel, logLevels, logAutoRefresh, logLevelLabel, logLevelClass,
-      pt, clients, policies, ptCards, ptBusy, ptTesting,
-      loadPt, ptPolicyAction, ptTestClient, restartPt, fmtSpeed,
+      pt, clients, policies, ptCards, ptTesting,
+      loadPt, ptPolicyAction, ptTestClient, fmtSpeed,
       // PT 下载器配置（系统设置）
       ptClients, ptFormBusy, ptFormDirty, ptAddClient, ptRemoveClient,
       loadPtForm, savePtForm,

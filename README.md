@@ -8,10 +8,9 @@
 | **115 监控** | 115 云下载任务超时自动清理 |
 | **PT 流量** | qBittorrent / Transmission 上传流量监控与自动限速 |
 
-> CD2 与 115 由 Python（FastAPI）实现；
-> PT 流量由 Go 子服务 [bt-traffic-guard](https://github.com/PeACE2323/bt-traffic-guard)
-> 计算，但**界面完全整合进 PTtools**——统一侧边栏、统一风格、统一事件日志，
-> 不是在页面里套一个别人的面板。
+> 三块能力全部由 **Python 单进程**实现，无子进程、无 Go 编译、无反向代理。
+> PT 流量部分移植自 [bt-traffic-guard](https://github.com/PeACE2323/bt-traffic-guard)，
+> 协议行为与原 Go 实现保持一致。
 
 ## 功能矩阵
 
@@ -62,9 +61,9 @@ pt-tools/
 │   │   ├── rules.py             # 规则 CRUD / 启停
 │   │   ├── tasks.py             # 实时任务 / 秒传记录 / 重试队列操作
 │   │   ├── p115.py              # 云下载列表 / 配置 / 取消日志
-│   │   ├── btguard.py           # 子进程反代 + 状态（排错入口）
-│   │   ├── pt.py                # PT 原生数据接口（/api/pt/*）
-│   │   └── settings.py          # 系统设置 / 连接测试 / Token 获取
+│   │   ├── pt.py                # PT 流量接口（/api/pt/*）
+│   │   ├── settings.py          # 系统设置 / 连接测试 / Token 获取
+│   │   └── webhook.py           # CD2 webhook 接收端点
 │   ├── services/
 │   │   ├── __init__.py
 │   │   ├── rules.py             # 规则匹配纯逻辑（无第三方依赖，可单测）
@@ -72,18 +71,15 @@ pt-tools/
 │   │   ├── webhook.py           # webhook 落库 + 源路径映射
 │   │   ├── cd2_client.py        # CD2 gRPC 封装（Bearer / 断线重连 / 任务管理）
 │   │   ├── p115_client.py       # 115 封装（异步 / check_response / 单条删除）
-│   │   ├── btguard.py           # Go 子进程管理 + 反向代理 + 数据访问
+│   │   ├── bt_client.py         # BT 下载器协议（qBittorrent / Transmission）
+│   │   ├── bt_policy.py         # 限速策略引擎（周期对齐 / 阈值 / 恢复）
+│   │   ├── bt_monitor.py        # PT 流量采集编排 + 配置持久化
 │   │   └── scheduler.py         # 监控与重试调度引擎（AsyncIOScheduler）
 │   └── proto/
 │       ├── __init__.py
 │       ├── clouddrive.proto     # 内置官方 proto 副本
 │       ├── clouddrive_pb2.py        # 构建时生成
 │       └── clouddrive_pb2_grpc.py   # 构建时生成
-├── btguard/                     # PT 流量监控（Go 源码，构建时编译）
-│   ├── cmd/bt-traffic-guard/    # 入口 main.go
-│   ├── internal/                # client / config / policy / traffic / web / notify
-│   ├── go.mod / go.sum
-│   └── config.example.yaml      # 首次启动时复制为初始配置
 ├── static/
 │   ├── index.html               # 单页 WebUI（Vue3 + TailwindCSS via CDN）
 │   └── vendor/                  # 可选：离线时放置 CDN 兜底资源
@@ -99,7 +95,7 @@ pt-tools/
 │   ├── schema.sql               # 权威 DDL 参考
 │   ├── API_NOTES.md             # 接口事实核查笔记（字段名/陷阱）
 │   └── WEBHOOK.md               # CD2 webhook 接入指南
-├── data/                        # 挂载卷：guard.db / 115-cookies.txt / logs/ / btguard/
+├── data/                        # 挂载卷：guard.db / 115-cookies.txt / logs/
 ├── tests/
 │   ├── __init__.py
 │   ├── run_all.py               # 一次跑完全部零依赖测试
@@ -111,8 +107,7 @@ pt-tools/
 │   ├── test_timeout_logic.py    # 排队状态不计入超时
 │   ├── test_instant_upload.py   # 秒传字节判据
 │   ├── test_health.py           # 健康检查与状态维护
-│   ├── test_btguard.py          # 子服务整合（反代/路径重写）
-│   └── test_pt_native.py        # 原生整合（无 iframe / 统一事件日志）
+│   ├── test_pt_python.py        # PT 流量（客户端/策略/无 Go 残留）
 ├── requirements.txt
 ├── requirements-optional.txt
 ├── Dockerfile                   # 多阶段：Go 编译 + Python 运行时
@@ -120,69 +115,58 @@ pt-tools/
 └── README.md
 ```
 
-## PT 流量监控是怎么整合进来的
+## PT 流量监控是怎么实现的
 
-Traffic Guard（bt-traffic-guard）原本是一个**独立的 Go 服务**，自带 HTTP 服务器
-和单页前端。整合分两层：
+原先是独立的 Go 服务（Traffic Guard），现已**用 Python 重写并并入本进程**：
 
-### 一、进程层：子进程 + 反向代理
+`	ext
+app/services/
+├── bt_client.py   下载器协议：qBittorrent / Transmission
+├── bt_policy.py   限速策略引擎：周期对齐、阈值判断、限速与恢复
+└── bt_monitor.py  采集编排 + 配置持久化（存 SQLite，不再用 YAML）
+`
 
-```text
-浏览器
-  │
-  ├── /            → PTtools 主 UI（Vue3）
-  ├── /api/*       → PTtools 后端（FastAPI）
-  ├── /api/pt/*    → 原生 PT 数据接口（转调 Go 的 JSON API）
-  │
-  └── /btg/*       → 反向代理 ──▶ 127.0.0.1:18080（Go 子服务）
-                                   └── Go 自带面板，仅作排错入口
-```
+优点：单一技术栈、单进程、无跨进程调用，也不需要 Go 工具链就能构建。
 
-| 设计 | 原因 |
+### 采集与判断
+
+`
+每 30 秒采集一轮
+    ↓
+并发拉取各下载器的：上传速度 / 累计上传量 / 种子数 / 连接数 / 当前限速
+    ↓
+按策略统计「本周期内增量」= 当前累计 - 周期起点累计
+    ↓
+增量 ≥ 阈值 且 未限速  →  下发限速
+    ↓
+进入新周期 / 手动解除  →  恢复原始限速
+`
+
+**为什么用「累计量差值」而不是「速率积分」**：
+速率采样有抖动、丢包，积分误差会累积；客户端自己维护的累计上传字节数
+做差最稳。客户端重启会让累计量归零（变小），检测到回退时会重新对齐基线，
+不会因此误判。
+
+### 支持的周期
+
+| 对齐方式 | 说明 |
 |---|---|
-| Go 二进制**只监听 127.0.0.1** | 不允许绕过 PTtools 直连，避免出现未受保护的口子 |
-| 路径前缀 `/btg` | Go 侧也占用 `/api/*`，必须隔离；反代时把 `/btg/api/x` 还原成 `/api/x` |
-| 重写 HTML 里的绝对路径 | Go 前端写死了 `/api/...`，需改写成 `/btg/api/...` |
-| 优雅关闭（先 SIGTERM） | Go 侧退出时会**恢复上传限速**；强制 kill 会让下载器永久停留在限速状态 |
-| 自动重启 + 连续失败上限 | 子进程崩溃不影响 CD2/115 功能；反复失败则停止重试并记录事件 |
-| 二进制缺失时优雅降级 | 若非 Docker 部署没编 Go，PT 页显示「不可用」，其余功能完全正常 |
+| day | 自然日，每天 00:00 重置 |
+| hour | 自然小时 |
+| week | 自然周（周一 00:00 起算） |
+| month | 自然月 |
+| 
+olling | 固定长度滚动窗口 |
 
-### 二、界面层：原生渲染，不是 iframe
+### 安全设计
 
-**最初的做法是把 Go 的整页面板用 iframe 塞进来**——那只是套壳：
-用户仍在两套界面之间切换，主题、导航、交互都对不上。
+**退出时一定解除限速**：容器停止/重启前会主动把所有被限速的下载器恢复原速。
+否则用户下次启动时会发现上传莫名很慢，却不知道是上次的限速没解除。
 
-现在改为 Python 调 Go 的 JSON API，**用 PTtools 自己的 UI 渲染**：
+### 配置存放位置
 
-| 原 Traffic Guard | 现在的位置 |
-|---|---|
-| 总览（实时速率、在线数） | **仪表盘**顶部指标卡 |
-| 策略进度与限速状态 | 侧边栏 **PT 策略** 页 |
-| 下载器明细与连通性测试 | 侧边栏 **PT 策略** 页 |
-| 事件（触发/解除限速） | 侧边栏 **事件日志**（与 CD2/115 事件合并） |
-| 配置（客户端、策略、通知） | **系统设置 → PT 流量监控** |
-
-对应的原生接口：
-
-```text
-GET  /api/pt/overview        聚合总览（仪表盘 + PT 页共用）
-GET  /api/pt/clients         下载器明细
-GET  /api/pt/policies        策略状态与进度
-GET  /api/pt/events          策略事件
-POST /api/pt/policy/{resume|trigger}
-GET  /api/pt/config          配置（YAML 原文）
-PUT  /api/pt/config          保存并热重载
-```
-
-> 配置以 **YAML 原文**读写，而不是逐字段映射：Go 侧配置结构字段很多
-> （客户端、策略、通知、鉴权），逐个映射既容易漏又容易随版本漂移。
-
-PT 的配置与历史数据存在 `/app/data/btguard/`，随卷持久化。
-首次启动会自动铺一份默认配置；之后在「系统设置 → PT 流量监控」里改，
-或点「填入配置模板」从示例开始。
-
-想用 Go 原始面板（字段最全）时，点设置页里的「打开原始面板 ↗」即可。
-
+全部在 SQLite 的 pp_settings 表（pt.clients / pt.policies），
+随 /app/data 卷持久化。不再有 YAML 文件，界面上可视化编辑。
 
 ## 快速开始
 

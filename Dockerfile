@@ -4,38 +4,12 @@
 # -----------------------------------------------------------------------------
 #   * CD2 守卫：CloudDrive2 上传任务秒传判定 / 超时拦截 / 备份重扫重试
 #   * 115 监控：云下载超时清理
-#   * BT 流量：qBittorrent / Transmission 上传流量监控与自动限速
-#               （Go 子服务，由 Python 侧反向代理到 /btg/*）
+#   * PT 流量：qBittorrent / Transmission 上传流量监控与自动限速
 #
-# 注意：Python 基础镜像必须 >= 3.12，因为 p115client 声明 Requires-Python
-#       >=3.12（3.11 上 pip 会直接拒绝安装）。
+# 纯 Python 单进程实现，无 Go 编译步骤、无子进程。
+# 注意：Python 必须 >= 3.12，p115client 声明 Requires-Python >=3.12。
 # =============================================================================
-
-# -----------------------------------------------------------------------------
-# Stage 1: 编译 bt-traffic-guard（Go）
-# -----------------------------------------------------------------------------
-FROM golang:1.24-alpine AS gobuild
-
-ARG GOPROXY=https://proxy.golang.org,direct
-
-WORKDIR /src
-
-# 先只拷依赖清单，最大化利用层缓存
-COPY btguard/go.mod btguard/go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
-
-# 再拷源码并静态编译
-COPY btguard/ ./
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
-        -o /out/bt-traffic-guard ./cmd/bt-traffic-guard
-
-# -----------------------------------------------------------------------------
-# Stage 2: Python 运行时
-# -----------------------------------------------------------------------------
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -44,7 +18,6 @@ ENV PYTHONUNBUFFERED=1 \
     TZ=Asia/Shanghai \
     APP_HOME=/app \
     DATA_DIR=/app/data \
-    BTG_BINARY=/app/btguard-bin/bt-traffic-guard \
     CD2_PROTO_URL=https://www.clouddrive2.com/api/clouddrive.proto
 
 # ---- OS 依赖（curl 用于健康检查，tzdata 保证时区正确） ----
@@ -57,7 +30,6 @@ WORKDIR ${APP_HOME}
 # ---- Python 依赖（独立层，源码改动不会让其失效） ----
 COPY requirements.txt requirements-optional.txt ./
 
-# 必需依赖：失败即中止
 RUN pip install --upgrade pip \
  && pip install -r requirements.txt
 
@@ -67,12 +39,6 @@ RUN pip install -r requirements-optional.txt \
 
 # ---- 应用源码 ----
 COPY . .
-
-# ---- 放入 Go 子服务二进制 + 它的示例配置 ----
-COPY --from=gobuild /out/bt-traffic-guard ${BTG_BINARY}
-# 校验二进制可执行（-version 会打印版本后退出）
-RUN chmod +x ${BTG_BINARY} \
- && ${BTG_BINARY} -version
 
 # ---- 编译 clouddrive.proto -> clouddrive_pb2*.py ----
 RUN python tools/fetch_proto.py --out app/proto
@@ -88,7 +54,7 @@ USER appuser
 VOLUME ["/app/data"]
 EXPOSE 8899
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8899/api/health || exit 1
 
 ENTRYPOINT ["/app/docker/entrypoint.sh"]

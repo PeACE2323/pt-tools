@@ -25,8 +25,7 @@ SUITES = [
     "test_timeout_logic.py",
     "test_instant_upload.py",
     "test_health.py",
-    "test_btguard.py",
-    "test_pt_native.py",
+    "test_pt_python.py",
 ]
 
 

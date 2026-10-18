@@ -44,6 +44,9 @@ jobs:
       - name: FastAPI 路由检查
         run: python tools/check_fastapi.py
 
+      - name: 前后端接口方法一致性
+        run: python tools/check_api_methods.py
+
       - name: 前端静态检查
         run: python tools/check_ui.py static/index.html
 
@@ -169,9 +172,10 @@ jobs:
           docker run --rm --entrypoint sh pttools:test -c '
             echo "=== proto 生成文件 ==="
             ls -l /app/app/proto/ || true
-            echo "=== BT 子服务二进制 ==="
-            ls -l /app/btguard-bin/ 2>/dev/null || echo "(缺失)"
-            /app/btguard-bin/bt-traffic-guard -version 2>/dev/null || echo "(无法执行)"
+            echo "=== PT 流量模块（纯 Python，无额外二进制） ==="
+            ls -l /app/app/services/bt_*.py
+            echo "=== 不应存在 Go 产物 ==="
+            test ! -d /app/btguard && echo "OK: 无 btguard 目录"
             echo "=== entrypoint 权限 ==="
             ls -l /app/docker/entrypoint.sh
             echo "=== 当前用户 ==="
@@ -218,49 +222,67 @@ jobs:
             [ "$code" = "200" ] || { echo "!! ${p} 返回 ${code}"; exit 1; }
           done
 
-      # 验证 BT 子服务整合：状态接口 + 反代是否真的把 Go 面板透出来了
-      - name: PT 流量整合验证
+      # PT 流量现在是纯 Python 实现：验证接口可用、配置能写入并热重载
+      - name: PT 流量验证
         run: |
           set -e
-          echo "--- 子服务状态 /api/btg/status ---"
-          curl -sS http://127.0.0.1:8899/api/btg/status | tee /tmp/btg.json
-          echo ""
-          python3 - <<'PY'
-          import json
-          d = json.load(open('/tmp/btg.json'))
-          assert d.get("available") is True, f"Go 二进制缺失: {d}"
-          assert d.get("running") is True, f"子服务未运行: {d}"
-          print("PT 子服务已就绪, pid =", d.get("pid"))
-          PY
-
-          echo "--- 原生接口 /api/pt/overview ---"
+          echo "--- 总览接口 ---"
           code=$(curl -sS -o /tmp/pt.json -w "%{http_code}" http://127.0.0.1:8899/api/pt/overview)
           echo "GET /api/pt/overview -> ${code}"
-          [ "$code" = "200" ] || { echo "!! 原生接口返回 ${code}"; cat /tmp/pt.json; exit 1; }
+          [ "$code" = "200" ] || { cat /tmp/pt.json; exit 1; }
           python3 - <<'PY'
           import json
           d = json.load(open('/tmp/pt.json'))
-          assert d.get("running") is True, f"overview 显示未运行: {d}"
-          assert "up_speed" in d, "overview 缺少速率字段"
-          print("原生总览 OK: up_speed=%s, clients=%s" % (d.get("up_speed"), d.get("client_count")))
+          assert d.get("running") is True, f"未运行: {d}"
+          assert "up_speed" in d and "client_count" in d
+          print("总览 OK: clients=%s policies=%s" % (d.get("client_count"), d.get("policy_count")))
           PY
 
-          echo "--- 策略与客户端接口 ---"
-          for p in /api/pt/policies /api/pt/clients /api/pt/events /api/pt/form /api/pt/policies/config; do
-            code=$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8899${p}")
-            echo "GET ${p} -> ${code}"
-            [ "$code" = "200" ] || exit 1
-          done
-
-          echo "--- 表单结构校验 ---"
-          curl -sS http://127.0.0.1:8899/api/pt/form -o /tmp/ptform.json
+          echo "--- 配置读写（下载器） ---"
+          curl -sS http://127.0.0.1:8899/api/pt/form -o /tmp/form.json
           python3 - <<'PY'
           import json
-          d = json.load(open('/tmp/ptform.json'))
-          for key in ("general", "clients", "policies"):
-              assert key in d, f"表单缺少 {key}"
-          print("表单结构 OK: clients=%d, policies=%d"
-                % (len(d["clients"]), len(d["policies"])))
+          d = json.load(open('/tmp/form.json'))
+          assert "clients" in d and "policies" in d
+          print("配置读取 OK: clients=%d" % len(d["clients"]))
+          PY
+
+          echo "--- 写入一个测试下载器配置 ---"
+          curl -sS -X PUT -H 'Content-Type: application/json' \
+            -d '{"clients":[{"name":"ci-test","type":"qbittorrent","url":"http://127.0.0.1:1","username":"","password":"","api_key":"","enabled":false,"insecure_skip_verify":false,"timeout":"3s"}]}' \
+            http://127.0.0.1:8899/api/pt/form | tee /tmp/save.json
+          echo ""
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/save.json'))
+          assert d.get("ok") is True, d
+          print("配置写入 OK")
+          PY
+
+          echo "--- 写入后能读回 ---"
+          curl -sS http://127.0.0.1:8899/api/pt/form -o /tmp/form2.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/form2.json'))
+          names = [c["name"] for c in d["clients"]]
+          assert "ci-test" in names, f"未保存成功: {names}"
+          # 密码/API Key 不应明文回传
+          for c in d["clients"]:
+              assert "password" not in c and "api_key" not in c, "敏感字段泄露"
+          print("读回 OK: %s" % names)
+          PY
+
+          echo "--- 策略配置读写 ---"
+          curl -sS -X PUT -H 'Content-Type: application/json' \
+            -d '{"policies":[{"name":"ci-policy","enabled":true,"clients":[],"window":"24h","align":"day","threshold_total":"1GiB","limit_total":"1M","resume_limit_total":"","resume_on_window_reset":true,"cooldown":"0s"}]}' \
+            http://127.0.0.1:8899/api/pt/policies/config | tee /tmp/psave.json
+          echo ""
+          curl -sS http://127.0.0.1:8899/api/pt/policies/config -o /tmp/plist.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/plist.json'))
+          assert any(p["name"] == "ci-policy" for p in d), d
+          print("策略读写 OK")
           PY
 
           echo "--- 仪表盘含 PT 字段 ---"
@@ -269,26 +291,8 @@ jobs:
           import json
           d = json.load(open('/tmp/dash.json'))
           assert "pt" in d, "仪表盘缺少 pt 字段"
-          assert d["pt"].get("running") is True, f"仪表盘 PT 未运行: {d['pt']}"
-          print("仪表盘 PT 总览 OK")
+          print("仪表盘 PT 字段 OK")
           PY
-
-          echo "--- 配置读取（YAML） ---"
-          code=$(curl -sS -o /tmp/ptcfg.json -w "%{http_code}" http://127.0.0.1:8899/api/pt/config)
-          echo "GET /api/pt/config -> ${code}"
-          [ "$code" = "200" ] || exit 1
-          python3 - <<'PY'
-          import json
-          d = json.load(open('/tmp/ptcfg.json'))
-          assert "yaml" in d and d["yaml"].strip(), "配置 YAML 为空"
-          print("配置读取 OK, %d 字节" % len(d["yaml"]))
-          PY
-
-          echo "--- 原始面板仍可访问（排错入口） ---"
-          code=$(curl -sS -o /tmp/btg.html -w "%{http_code}" http://127.0.0.1:8899/btg/)
-          echo "GET /btg/ -> ${code}"
-          [ "$code" = "200" ] || exit 1
-          grep -q '/btg/api/' /tmp/btg.html && echo "路径重写 OK"
 
 
       - name: 失败时输出完整诊断

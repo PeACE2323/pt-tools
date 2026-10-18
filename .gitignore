@@ -13,12 +13,6 @@ app/proto/clouddrive_pb2.py
 app/proto/clouddrive_pb2.pyi
 app/proto/clouddrive_pb2_grpc.py
 
-# BT 子服务（Go）构建产物与缓存
-btguard-bin/
-/bt-traffic-guard
-btguard/.tools/
-btguard/vendor/
-
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
