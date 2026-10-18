@@ -145,9 +145,26 @@ class QBittorrentClient(BaseClient):
                 base_url=self.url,
                 timeout=httpx.Timeout(self.timeout, connect=min(5.0, self.timeout)),
                 verify=self.verify_tls,
-                follow_redirects=True,
+                # 不开自动重定向：qBittorrent 会校验 Referer/Origin 与 Host 是否
+                # 同源，一旦跟随重定向导致 Host 变化，后续请求就会 403。
+                follow_redirects=False,
             )
         return self._http
+
+    def _origin_headers(self) -> dict[str, str]:
+        """qBittorrent 要求的同源头。
+
+        **这是 403 的根因**：qB 在启用了「Host header validation」或
+        CSRF 保护时，会校验每个请求的 ``Referer``/``Origin`` 是否与
+        请求的 ``Host`` 一致。只在登录时传是不够的 —— 后续所有
+        ``/api/v2/*`` 请求都必须带上，否则返回 403 Forbidden。
+
+        参见官方文档：
+        https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-(qBittorrent-4.1)
+        """
+        # self.url 形如 http://192.168.1.10:8080（已去掉尾部斜杠）
+        origin = self.url
+        return {"Referer": origin, "Origin": origin}
 
     async def close(self) -> None:
         if self._http is not None and not getattr(self._http, "is_closed", True):
@@ -187,7 +204,9 @@ class QBittorrentClient(BaseClient):
                 "referer": self.url,
             }
             try:
-                resp = await client.post("/api/v2/auth/login", data=form)
+                resp = await client.post(
+                    "/api/v2/auth/login", data=form, headers=self._origin_headers()
+                )
             except Exception as exc:  # noqa: BLE001
                 raise ClientError(f"登录 qBittorrent 失败: {exc}") from exc
 
@@ -222,20 +241,35 @@ class QBittorrentClient(BaseClient):
         self._logged_in = False
 
     # ------------------------------------------------------------ 请求
+    def _request_headers(self) -> dict[str, str]:
+        """合并认证头与同源 Referer/Origin。
+
+        两个都必须带：只有 Authorization 没有 Origin 一样会被 403。
+        """
+        headers = self._origin_headers()
+        headers.update(self._auth_headers())
+        return headers
+
     async def _get(self, path: str, *, _retry: bool = True) -> Any:
         await self._ensure_login()
         client = self._client()
-        headers = self._auth_headers()
         try:
-            resp = await client.get(path, headers=headers)
+            resp = await client.get(path, headers=self._request_headers())
         except Exception as exc:  # noqa: BLE001
             raise ClientError(f"请求 {path} 失败: {exc}") from exc
 
         if resp.status_code == 403 and _retry and not self.api_key:
-            # Cookie 失效：重新登录后重试一次
+            # Cookie 可能已失效（qB 重启 / 会话过期），重试一次。
+            #
+            # 注意：只在「已登录过」时重试。若刚登录成功立刻 403，
+            # 说明是 Referer/Origin 校验或 IP 封禁，再登录只会加剧封禁。
+            if not self._logged_in:
+                raise ClientError(self._forbidden_hint(path))
             self._invalidate_auth()
             await self._ensure_login()
             return await self._get(path, _retry=False)
+        if resp.status_code == 403:
+            raise ClientError(self._forbidden_hint(path))
         if resp.status_code >= 400:
             raise ClientError(
                 f"请求 {path} 返回 HTTP {resp.status_code}: {resp.text[:120]}"
@@ -245,19 +279,34 @@ class QBittorrentClient(BaseClient):
         except ValueError as exc:
             raise ClientError(f"{path} 返回的不是 JSON") from exc
 
+    def _forbidden_hint(self, path: str) -> str:
+        """403 的可操作提示。"""
+        return (
+            f"请求 {path} 返回 403 Forbidden。常见原因：\n"
+            f"  1) qBittorrent 的「Host header validation」/ CSRF 保护"
+            f"拒绝了来源（已自动带上 Referer/Origin: {self.url}，"
+            f"若你的地址与 WebUI 实际访问地址不一致，请改成一致）\n"
+            f"  2) 登录失败次数过多，IP 被临时封禁"
+            f"（WebUI → 选项 → Web UI → 解除封禁）\n"
+            f"  3) 若 qBittorrent ≥ 5.2.0，建议改用 API Key 认证"
+        )
+
     async def _post_form(self, path: str, form: dict[str, Any], *, _retry: bool = True) -> None:
         await self._ensure_login()
         client = self._client()
-        headers = self._auth_headers()
         try:
-            resp = await client.post(path, data=form, headers=headers)
+            resp = await client.post(path, data=form, headers=self._request_headers())
         except Exception as exc:  # noqa: BLE001
             raise ClientError(f"请求 {path} 失败: {exc}") from exc
 
         if resp.status_code == 403 and _retry and not self.api_key:
+            if not self._logged_in:
+                raise ClientError(self._forbidden_hint(path))
             self._invalidate_auth()
             await self._ensure_login()
             return await self._post_form(path, form, _retry=False)
+        if resp.status_code == 403:
+            raise ClientError(self._forbidden_hint(path))
         if resp.status_code >= 400:
             raise ClientError(
                 f"请求 {path} 返回 HTTP {resp.status_code}: {resp.text[:120]}"

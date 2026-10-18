@@ -266,6 +266,48 @@ def test_progress_percentage():
     print("✓ 进度百分比正确")
 
 
+def test_qb_origin_headers():
+    """qBittorrent 每个请求都必须带同源 Referer/Origin。
+
+    这是 403 Forbidden 的直接成因：qB 会校验 Referer/Origin 是否与
+    请求的 Host 一致，只在登录时传是不够的 —— 后续所有 ``/api/v2/*``
+    请求都要带，否则登录成功但取数据 403。
+
+    参见官方文档：
+    https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-(qBittorrent-4.1)
+    """
+    from app.services.bt_client import QBittorrentClient
+
+    c = QBittorrentClient(
+        "qb", "http://192.168.7.101:8080", username="u", password="p"
+    )
+    h = c._request_headers()  # noqa: SLF001
+    assert h.get("Referer") == "http://192.168.7.101:8080", h
+    assert h.get("Origin") == "http://192.168.7.101:8080", h
+    print("✓ qB 请求带同源 Referer/Origin（修复 403）")
+
+
+def test_qb_origin_with_api_key():
+    """API Key 模式同样需要同源头。"""
+    from app.services.bt_client import QBittorrentClient
+
+    c = QBittorrentClient("qb", "http://h:8080", api_key="qbt_abc")
+    h = c._request_headers()  # noqa: SLF001
+    assert h.get("Authorization") == "Bearer qbt_abc", h
+    assert h.get("Origin") == "http://h:8080", h
+    print("✓ API Key 模式也带同源头")
+
+
+def test_qb_no_auto_redirect():
+    """不能自动跟随重定向：Host 变化会让 Referer 校验失效。"""
+    src = (ROOT / "app" / "services" / "bt_client.py").read_text(encoding="utf-8")
+    # 定位 qB 客户端的 _client
+    idx = src.find("class QBittorrentClient")
+    seg = src[idx : idx + 3000]
+    assert "follow_redirects=False" in seg, "qB 客户端不应自动跟随重定向"
+    print("✓ qB 客户端禁用自动重定向")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
