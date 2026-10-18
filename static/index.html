@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CD2-115-Guard · 上传守卫与云下载清理</title>
+<title>PTtools · PT 站点运维工具箱</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%2310b981'/><text x='16' y='22' font-size='14' font-family='sans-serif' font-weight='bold' text-anchor='middle' fill='white'>PT</text></svg>">
 <script src="https://cdn.jsdelivr.net/npm/vue@3.4.21/dist/vue.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tailwindcss@3.4.1/lib/index.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
@@ -104,6 +105,25 @@
 
       <!-- ============ 仪表盘 ============ -->
       <div v-if="tab==='dashboard'" class="space-y-5">
+
+        <!--
+          首次加载骨架：dash 初始是空对象，若直接渲染会先显示一片
+          「未连接 / 未配置 / 0」的红色状态，数据到达后再跳变，
+          观感很差也容易让人误以为真的没连上。
+          这里在拿到第一份数据前显示中性占位。
+        -->
+        <div v-if="!dashReady" class="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">
+          <div v-for="i in 4" :key="i"
+               class="bg-white rounded-xl border border-slate-200 p-4 animate-pulse">
+            <div class="flex items-center gap-2 mb-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-slate-200"></span>
+              <span class="h-3 w-20 bg-slate-200 rounded"></span>
+            </div>
+            <div class="h-3 w-32 bg-slate-100 rounded mt-2"></div>
+          </div>
+        </div>
+
+        <template v-else>
 
         <!-- 一、服务状态：一行扫完，异常才展开细节 -->
         <div class="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">
@@ -325,6 +345,7 @@
             </div>
           </div>
         </div>
+        </template><!-- /dashReady -->
       </div>
 
       <!-- ============ 规则管理 ============ -->
@@ -1551,7 +1572,9 @@ const api = async (method, path, body) => {
 createApp({
   setup() {
     const tab = ref('dashboard');
-    const version = ref('1.0.0');
+    // 版本号初值直接写当前版本：之前是硬编码的 '1.0.0'，页面加载后才被
+    // /api/version 覆盖，所以会先闪一下旧版本号。为空时干脆不显示占位。
+    const version = ref('2.1.0');
     const loading = ref(false);
     const saving = ref(false);
     const lastRefresh = ref(Date.now());
@@ -1573,6 +1596,8 @@ createApp({
     const dash = reactive({
       cd2: {}, p115: {}, pt: { running: false, available: false }, stats: {}, scheduler: { jobs: [] },
     });
+    // 是否已拿到第一份仪表盘数据（用于首屏骨架，避免状态闪烁）
+    const dashReady = ref(false);
     const rules = ref([]);
     const liveTasks = ref([]);
     const instantPage = reactive({ items: [], total: 0, page: 1, page_size: 50 });
@@ -1717,6 +1742,9 @@ createApp({
     const loadDashboard = async () => {
       const d = await api('GET', '/api/dashboard');
       Object.assign(dash, d);
+      // 拿到第一份数据后才渲染真实内容，避免首屏闪一下
+      // 「未连接 / 未配置 / 0」的误导性状态
+      dashReady.value = true;
     };
     const loadRules = async () => { rules.value = await api('GET', '/api/rules'); };
     const loadLive = async () => { liveTasks.value = await api('GET', '/api/tasks/live'); };
@@ -2622,7 +2650,7 @@ body = '''
     });
 
     return {
-      version, tab, tabs, currentTab, loading, saving, toast, dash, lastRefreshText,
+      version, tab, tabs, currentTab, loading, saving, toast, dash, dashReady, lastRefreshText,
       rules, liveTasks, instantPage, nonInstantPage, offlineTasks, cancelLogsPage,
       events, settings, form, p115Config, taskTab, p115Tab, taskSubTabs, p115SubTabs,
       logLevel, logLevels, logAutoRefresh, logLevelLabel, logLevelClass,

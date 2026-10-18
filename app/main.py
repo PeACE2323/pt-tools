@@ -180,7 +180,7 @@ async def health() -> dict[str, object]:
 
 @app.get("/api/version", tags=["system"], summary="版本信息")
 async def version() -> dict[str, str]:
-    return {"name": "CD2-115-Guard", "version": __version__}
+    return {"name": "PTtools", "version": __version__}
 
 
 # ===========================================================================

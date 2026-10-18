@@ -394,6 +394,54 @@ def test_policy_editor_collapsible():
     print("✓ 策略编辑区可折叠且保存后自动收起")
 
 
+def test_branding_is_pttools():
+    """页面标题、图标、版本接口都应显示 PTtools。"""
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+
+    assert "CD2-115-Guard" not in ui, "页面仍残留旧项目名 CD2-115-Guard"
+    assert "<title>PTtools" in ui, "页面标题未改为 PTtools"
+    # favicon：避免浏览器标签显示默认地球图标
+    assert 'rel="icon"' in ui, "缺少 favicon"
+
+    assert '"name": "PTtools"' in main, "/api/version 返回名未更新"
+    print("✓ 品牌信息统一为 PTtools")
+
+
+def test_no_version_flicker():
+    """版本号初值必须是当前版本，不能是旧的 1.0.0。
+
+    前端 version 初始值若为 '1.0.0'，页面加载后才被 /api/version 覆盖，
+    用户会看到版本号先显示 1.0.0 再跳变成实际版本。
+    """
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    init = (ROOT / "app" / "__init__.py").read_text(encoding="utf-8")
+
+    import re
+
+    m = re.search(r'const version = ref\(\'([^\']*)\'\)', ui)
+    assert m, "未找到 version 初值"
+    frontend_ver = m.group(1)
+
+    v = re.search(r'__version__ = "([^"]+)"', init)
+    assert v, "未找到后端版本号"
+    backend_ver = v.group(1)
+
+    assert frontend_ver == backend_ver, (
+        f"前端版本初值 {frontend_ver} 与后端 {backend_ver} 不一致，会闪烁"
+    )
+    print(f"✓ 版本号初值一致（{backend_ver}，无闪烁）")
+
+
+def test_dashboard_loading_skeleton():
+    """仪表盘首屏应显示骨架，而不是「未连接/0」的错误状态。"""
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    assert "dashReady" in ui, "缺少首屏就绪标志"
+    assert 'v-if="!dashReady"' in ui, "缺少加载骨架"
+    assert "animate-pulse" in ui, "骨架缺少动画"
+    print("✓ 仪表盘首屏骨架（避免状态闪烁）")
+
+
 def test_qb_no_auto_redirect():
     """不能自动跟随重定向：Host 变化会让 Referer 校验失效。"""
     src = (ROOT / "app" / "services" / "bt_client.py").read_text(encoding="utf-8")
