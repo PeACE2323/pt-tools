@@ -351,6 +351,49 @@ def test_dashboard_uses_new_monitor():
     print("✓ 仪表盘使用新监控器")
 
 
+def test_render_does_not_gate_on_running():
+    """渲染与加载都不能依赖 pt.running 这类异步状态。
+
+    pt.running 初始为 false，首次渲染时用它做 v-if / 前置判断会导致：
+      1. 刷新页面后下载器表单整块不显示（切页签再回来才出现）
+      2. loadPtForm / loadPtPolicies 被静默跳过
+    """
+    import re
+
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    # 下载器表单容器不得用 pt.running 做条件
+    idx = ui.find("<!-- 下载器列表 -->")
+    assert idx > 0, "未找到下载器列表区块"
+    seg = ui[idx : idx + 400]
+    head = seg.split("v-for")[0]
+    assert 'v-if="pt.running"' not in head, (
+        "下载器列表容器仍用 pt.running 做条件，首屏会空白"
+    )
+
+    # 加载函数内部不能用 pt.running 提前 return
+    for fn in ("loadPtForm", "loadPtPolicies"):
+        idx = ui.find(f"const {fn} = async")
+        assert idx > 0, f"未找到 {fn}"
+        block = ui[idx : idx + 600]
+        assert "if (!pt.running) return" not in block, (
+            f"{fn} 用 pt.running 提前返回，异步加载时会被跳过"
+        )
+    print("✓ 渲染与加载不依赖异步状态（修复刷新空白）")
+
+
+def test_policy_editor_collapsible():
+    """策略编辑区应可折叠，保存后自动收起。"""
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    assert "ptEditorOpen" in ui, "缺少编辑区折叠状态"
+    assert "v-if=\"ptEditorOpen\"" in ui, "编辑区未使用折叠条件"
+    # 保存成功后收起
+    idx = ui.find("const savePtPolicies")
+    block = ui[idx : idx + 1400]
+    assert "ptEditorOpen.value = false" in block, "保存后未收起编辑区"
+    print("✓ 策略编辑区可折叠且保存后自动收起")
+
+
 def test_qb_no_auto_redirect():
     """不能自动跟随重定向：Host 变化会让 Referer 校验失效。"""
     src = (ROOT / "app" / "services" / "bt_client.py").read_text(encoding="utf-8")

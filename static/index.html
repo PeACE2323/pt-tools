@@ -823,7 +823,26 @@
             </div>
 
             <!-- 策略编辑 -->
-            <div class="mt-4 pt-4 border-t border-slate-100 space-y-3">
+            <!--
+              默认收起：策略配置好之后，日常只关心上面的运行状态与进度。
+              一直展开会让页面很长，也容易误改。
+            -->
+            <div class="mt-4 pt-4 border-t border-slate-100">
+              <div class="flex flex-wrap items-center gap-2">
+                <button @click="ptEditorOpen = !ptEditorOpen"
+                  class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs flex items-center gap-1.5">
+                  <span class="text-slate-400">{{ ptEditorOpen ? '▾' : '▸' }}</span>
+                  编辑策略
+                  <span class="text-slate-400">({{ ptPolicies.length }})</span>
+                </button>
+                <span v-if="ptPolicyDirty && !ptEditorOpen"
+                  class="text-[11px] text-amber-600">有未保存的修改</span>
+                <div class="flex-1"></div>
+                <button v-if="!ptEditorOpen" @click="ptAddPolicy(); ptEditorOpen = true"
+                  class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs">+ 添加策略</button>
+              </div>
+
+              <div v-if="ptEditorOpen" class="mt-3 space-y-3">
               <div v-for="(p, i) in ptPolicies" :key="i"
                    class="border border-slate-200 rounded-lg p-3 space-y-3 bg-slate-50/40">
                 <div class="flex items-center gap-2">
@@ -922,7 +941,7 @@
                 </div>
               </div>
 
-              <div class="flex flex-wrap gap-2 items-center">
+              <div class="flex flex-wrap gap-2 items-center pt-1">
                 <button @click="ptAddPolicy()" type="button"
                   class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs">+ 添加策略</button>
                 <div class="flex-1"></div>
@@ -932,6 +951,7 @@
                   {{ ptPolicyBusy ? '保存中…' : '保存策略' }}
                 </button>
               </div>
+              </div><!-- /v-if ptEditorOpen -->
             </div>
           </div>
 
@@ -1131,7 +1151,12 @@
           </p>
 
           <!-- 下载器列表 -->
-          <div v-if="pt.running" class="space-y-3">
+          <!--
+            注意：不要用 pt.running 作为渲染条件。它是异步加载的状态，
+            首次渲染时还是 false，会让整个表单区不显示——表现就是
+            「刷新页面后下载器不见了，切个页签再回来才出现」。
+          -->
+          <div class="space-y-3">
             <div v-for="(c, i) in ptClients" :key="i"
                  class="border border-slate-200 rounded-lg p-3 space-y-3">
               <div class="flex items-center gap-2">
@@ -1221,7 +1246,7 @@
           </div>
 
           <div class="flex flex-wrap gap-2 mt-3 pt-3 border-t border-slate-100">
-            <button @click="loadPtForm()" :disabled="ptFormBusy || !pt.running"
+            <button @click="loadPtForm()" :disabled="ptFormBusy"
               class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs disabled:opacity-50">
               重新加载
             </button>
@@ -1592,6 +1617,9 @@ createApp({
     const ptPolicies = ref([]);
     const ptPolicyOriginal = ref('[]');
     const ptPolicyBusy = ref(false);
+    // 策略编辑区是否展开。默认收起：配置好后日常只关心运行状态，
+    // 一直展开会让页面很长，也容易误改配置。
+    const ptEditorOpen = ref(false);
     const ptPolicyDirty = computed(
       () => JSON.stringify(ptPolicies.value) !== ptPolicyOriginal.value
     );
@@ -1756,10 +1784,14 @@ createApp({
         }
         if (tab.value === 'settings') {
           await loadSettings();
-          // 进入设置页时顺带刷新 PT 状态与下载器表单；
-          // 若用户正在编辑（有未保存修改），不覆盖输入。
-          if (!pt.running || !pt.available) await loadPt();
-          else if (!ptFormDirty.value) await loadPtForm();
+          // 进入设置页时加载 PT 状态与下载器表单。
+          //
+          // 注意：这里**不能**用 pt.running 做前置条件。它是响应式状态，
+          // 页面刚加载时还是 false，会导致首次渲染跳过 loadPtForm()，
+          // 表单空白（刷新后看不到已保存的下载器，切页再回来才出现）。
+          // 正确做法：先刷新状态，再无条件（除非用户正在编辑）加载表单。
+          await loadPt();
+          if (!ptFormDirty.value) await loadPtForm();
         }
         if (tab.value === 'logs') await loadEvents();
         if (tab.value === 'pt') {
@@ -1908,10 +1940,8 @@ createApp({
     };
 
     const loadPtForm = async () => {
-      if (!pt.running) {
-        showToast('PT 子服务未运行，无法读取配置', 'error');
-        return;
-      }
+      // 不再用 pt.running 做前置判断：后端是本进程内的模块，
+      // 即使状态字段尚未加载，配置接口也是可用的。
       ptFormBusy.value = true;
       try {
         const r = await api('GET', '/api/pt/form');
@@ -2058,7 +2088,7 @@ createApp({
     };
 
     const loadPtPolicies = async () => {
-      if (!pt.running) return;
+      // 同上：不用 pt.running 做前置判断，避免首次加载时被跳过
       try {
         const list = await api('GET', '/api/pt/policies/config');
         ptPolicies.value = _normalizePolicies(list);
@@ -2111,6 +2141,8 @@ createApp({
         });
         showToast(r.message || '策略已保存', 'success');
         await Promise.all([loadPtPolicies(), loadPt()]);
+        // 保存成功后收起编辑区，回到「只看运行状态」的清爽视图
+        ptEditorOpen.value = false;
       } catch (e) {
         showToast('保存失败：' + e.message, 'error');
       } finally {
@@ -2600,7 +2632,7 @@ body = '''
       ptClients, ptFormBusy, ptFormDirty, ptAddClient, ptRemoveClient,
       loadPtForm, savePtForm,
       // PT 限速策略（PT 策略页）
-      ptPolicies, ptPolicyBusy, ptPolicyDirty, ptAddPolicy, ptRemovePolicy,
+      ptPolicies, ptPolicyBusy, ptPolicyDirty, ptEditorOpen, ptAddPolicy, ptRemovePolicy,
       sizeUnits, speedUnits, policyBytes,
       loadPtPolicies, savePtPolicies,
       instantQuery, retryQuery, retryStatus, selectedRetry, allRetrySelected,
