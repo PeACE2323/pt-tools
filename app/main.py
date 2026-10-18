@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -74,6 +75,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "未加载到任何下载器配置。若此前保存过，请检查 "
                 "-v 挂载是否指向 /app/data（容器重建后数据库丢失会导致配置清空）"
             )
+
+        # 立即做一次采集。
+        #
+        # 否则要等调度器第一次轮询（30 秒后）才有数据，表现为：
+        # 重启后刷新页面看不到下载器，干等半分钟才出现。
+        # 采集失败不影响启动（下载器可能暂时不可达）。
+        if monitor.client_names:
+            try:
+                await asyncio.wait_for(monitor.poll_once(), timeout=25)
+                logger.info("PT 首次采集完成")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("PT 首次采集未完成（稍后自动重试）: %s", exc)
+
         logger.info("PT 流量监控已就绪")
     except Exception as exc:  # noqa: BLE001
         logger.exception("PT 流量监控初始化失败")
@@ -89,7 +103,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 否则下载器会永久停留在限速状态，用户下次启动时
         # 会发现上传异常慢却不知道为什么。原 Go 子服务也是这样做的。
         try:
-            from .services.bt_monitor import get_pt_monitor
+            from .services.bt_monitor import get_pt_monitor, persist_pt_runtime
 
             monitor = get_pt_monitor()
             for state in monitor.engine.states():
@@ -98,6 +112,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                         await monitor.engine.force_resume(state.name, monitor._clients)  # noqa: SLF001
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("解除策略 %s 限速失败: %s", state.name, exc)
+            # 关闭前再落盘一次运行时状态，确保下次启动能接续本周期进度
+            persist_pt_runtime(monitor.engine)
             await monitor.close()
         except Exception as exc:  # noqa: BLE001
             logger.warning("PT 监控关闭异常: %s", exc)

@@ -28,6 +28,8 @@ logger = get_logger("guard.bt.monitor")
 #: 配置在 app_settings 中的 key
 SETTING_CLIENTS = "pt.clients"
 SETTING_POLICIES = "pt.policies"
+#: 策略运行时状态（周期基准、限速标记），与用户配置分开存
+SETTING_RUNTIME = "pt.runtime"
 
 
 # ===========================================================================
@@ -82,6 +84,58 @@ def save_pt_config(
         _set(SETTING_POLICIES, policies)
 
 
+# ---------------------------------------------------------------- 运行时状态
+def load_pt_runtime(session) -> dict:
+    """读取策略运行时状态（周期基准、限速标记）。
+
+    与配置分开存：配置是用户编辑的，运行时状态是引擎自己维护的。
+    """
+    from ..models import AppSetting
+
+    row = session.get(AppSetting, SETTING_RUNTIME)
+    if row is None or not row.value:
+        return {}
+    try:
+        data = json.loads(row.value)
+        return data if isinstance(data, dict) else {}
+    except (ValueError, TypeError):
+        logger.warning("运行时状态解析失败，已忽略")
+        return {}
+
+
+def save_pt_runtime(session, state: dict) -> None:
+    """写入策略运行时状态。"""
+    from datetime import datetime, timezone
+
+    from ..models import AppSetting
+
+    text = json.dumps(state, ensure_ascii=False)
+    row = session.get(AppSetting, SETTING_RUNTIME)
+    if row is None:
+        session.add(
+            AppSetting(
+                key=SETTING_RUNTIME,
+                value=text,
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+    else:
+        row.value = text
+        row.updated_at = datetime.now(timezone.utc)
+
+
+def persist_pt_runtime(engine) -> None:
+    """把引擎状态落盘（供采集循环定期调用）。"""
+    from ..models import session_scope
+
+    try:
+        state = engine.export_state()
+        with session_scope() as session:
+            save_pt_runtime(session, state)
+    except Exception as exc:  # noqa: BLE001 - 落盘失败不影响采集
+        logger.debug("保存 PT 运行时状态失败: %s", exc)
+
+
 # ===========================================================================
 # 监控器
 # ===========================================================================
@@ -114,6 +168,8 @@ class PTMonitor:
         self._lock = asyncio.Lock()
         self._last_error = ""
         self._loaded = False
+        # 采集轮次计数，用于控制运行时状态的落盘频率
+        self._poll_count = 0
 
     # ------------------------------------------------------------ 配置
     async def reload(self) -> None:
@@ -122,6 +178,7 @@ class PTMonitor:
 
         with session_scope() as session:
             clients, policies = load_pt_config(session)
+            runtime = load_pt_runtime(session)
 
         self._configs = clients
         self._policy_configs = policies
@@ -143,6 +200,18 @@ class PTMonitor:
         self.engine.apply_config(
             [PolicyConfig.from_dict(p) for p in policies if p.get("name")]
         )
+        # 恢复上次的周期基准与限速状态。
+        # 否则容器重启后本周期流量会从 0 重新计算（用户看到"清零"）。
+        # 若重启跨越了周期边界，evaluate() 会检测到 window_key 变化并
+        # 正常重置——那是新周期应有的行为。
+        if runtime:
+            self.engine.import_state(runtime)
+            restored = sum(
+                1 for v in runtime.values() if v.get("window_key")
+            )
+            if restored:
+                logger.info("已恢复 %d 条策略的周期进度", restored)
+
         self._loaded = True
         logger.info(
             "PT 配置已加载：%d 个下载器，%d 条策略",
@@ -214,6 +283,12 @@ class PTMonitor:
             except Exception as exc:  # noqa: BLE001
                 logger.exception("策略求值失败")
                 self._last_error = f"策略求值失败: {exc}"
+
+            # 定期把周期基准落盘，避免重启后本周期流量归零。
+            # 用计数控制频率，不必每轮都写。
+            self._poll_count += 1
+            if self._poll_count % 4 == 0:
+                persist_pt_runtime(self.engine)
 
             return self._snapshot
 

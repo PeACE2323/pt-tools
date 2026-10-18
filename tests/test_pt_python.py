@@ -442,6 +442,85 @@ def test_dashboard_loading_skeleton():
     print("✓ 仪表盘首屏骨架（避免状态闪烁）")
 
 
+# ---------------------------------------------------------------- 状态持久化
+def test_runtime_state_roundtrip():
+    """策略运行时状态必须能导出并恢复。
+
+    baseline 记录周期起点时各客户端的累计上传量。若它只在内存里，
+    容器重启后第一轮采集会把「当前累计量」当成新基线，本周期流量
+    从 0 重算——用户看到的就是「重启后清零」。
+    """
+    import json
+
+    from app.services.bt_policy import PolicyConfig, PolicyEngine
+
+    e1 = PolicyEngine()
+    e1.apply_config([PolicyConfig(name="p", threshold_total=1000)])
+    rt = e1._runtimes["p"]  # noqa: SLF001
+    rt.baseline = {"qb": 5_000_000, "tr": 1_000}
+    rt.window_key = "2026-10-18T00:00:00"
+    rt.used = 480_000
+    rt.limited = True
+    rt.original_limits = {"qb": 2621440}
+
+    blob = json.dumps(e1.export_state())
+
+    # 模拟重启：全新引擎 + 恢复
+    e2 = PolicyEngine()
+    e2.apply_config([PolicyConfig(name="p", threshold_total=1000)])
+    e2.import_state(json.loads(blob))
+
+    rt2 = e2._runtimes["p"]  # noqa: SLF001
+    assert rt2.baseline == rt.baseline, rt2.baseline
+    assert rt2.window_key == rt.window_key
+    assert rt2.used == rt.used
+    assert rt2.limited is True
+    assert rt2.original_limits == rt.original_limits
+
+    st = e2.states()[0]
+    assert st.current_total == 480_000, st.current_total
+    print("✓ 运行时状态可持久化（重启不清零）")
+
+
+def test_runtime_state_survives_new_period():
+    """跨周期后应正常重置，不能把上周期进度带过来。"""
+    import asyncio
+
+    from app.services.bt_policy import PolicyConfig, PolicyEngine
+
+    e = PolicyEngine()
+    e.apply_config([PolicyConfig(name="p", threshold_total=1000, align="day")])
+    e.import_state(
+        {"p": {"window_key": "1999-01-01T00:00:00", "baseline": {"a": 100}}}
+    )
+    rt = e._runtimes["p"]  # noqa: SLF001
+    rt.window_key = "1999-01-01T00:00:00"
+
+    asyncio.run(e.evaluate({"a": {"up_total": 9999}}, {}))
+    assert rt.baseline.get("a") == 9999, rt.baseline
+    print("✓ 跨周期正确重置基线")
+
+
+def test_runtime_persisted_to_db():
+    """监控器应把运行时状态写入独立配置项。"""
+    mon = (ROOT / "app" / "services" / "bt_monitor.py").read_text(encoding="utf-8")
+    assert "SETTING_RUNTIME" in mon, "缺少运行时状态配置项"
+    assert "def load_pt_runtime" in mon
+    assert "def save_pt_runtime" in mon
+    assert "def persist_pt_runtime" in mon
+    # 轮询中应定期落盘
+    assert "persist_pt_runtime(self.engine)" in mon
+    print("✓ 运行时状态定期落盘")
+
+
+def test_startup_polls_immediately():
+    """启动时应立即采集一次，否则要等 30 秒才看到下载器。"""
+    main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    assert "poll_once()" in main, "启动时未做首次采集"
+    assert "首次采集" in main
+    print("✓ 启动时立即采集（不必等 30 秒）")
+
+
 def test_qb_no_auto_redirect():
     """不能自动跟随重定向：Host 变化会让 Referer 校验失效。"""
     src = (ROOT / "app" / "services" / "bt_client.py").read_text(encoding="utf-8")

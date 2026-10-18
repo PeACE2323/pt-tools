@@ -313,6 +313,61 @@ class PolicyEngine:
     def configs(self) -> list[PolicyConfig]:
         return [rt.config for rt in self._runtimes.values()]
 
+    # ------------------------------------------------------------ 状态持久化
+    def export_state(self) -> dict[str, Any]:
+        """导出运行时状态，供重启后恢复。
+
+        **为什么需要**：``baseline`` 记录周期起点时各客户端的累计上传量，
+        ``window_key`` 记录当前周期。它们原先只在内存里，容器重启后
+        全部丢失 —— 第一轮采集会把「当前累计量」当成新基线，
+        导致本周期流量从 0 重新开始计算。
+
+        导出内容不含敏感信息，只有计量基准与限速状态。
+        """
+        out: dict[str, Any] = {}
+        for name, rt in self._runtimes.items():
+            out[name] = {
+                "window_key": rt.window_key,
+                "baseline": dict(rt.baseline),
+                "limited": rt.limited,
+                "limited_at": rt.limited_at,
+                "original_limits": dict(rt.original_limits),
+                "used": rt.used,
+            }
+        return out
+
+    def import_state(self, state: dict[str, Any] | None) -> None:
+        """恢复运行时状态。
+
+        只恢复「周期仍有效」的部分：若重启跨越了周期边界，
+        ``evaluate()`` 会自动检测到 ``window_key`` 不匹配并重置，
+        这是正确行为（新周期就该从 0 算）。
+        """
+        if not isinstance(state, dict):
+            return
+        for name, data in state.items():
+            rt = self._runtimes.get(name)
+            if rt is None or not isinstance(data, dict):
+                continue
+            baseline = data.get("baseline")
+            if isinstance(baseline, dict):
+                rt.baseline = {
+                    str(k): int(v)
+                    for k, v in baseline.items()
+                    if isinstance(v, (int, float))
+                }
+            rt.window_key = str(data.get("window_key") or "")
+            rt.limited = bool(data.get("limited"))
+            rt.limited_at = float(data.get("limited_at") or 0)
+            limits = data.get("original_limits")
+            if isinstance(limits, dict):
+                rt.original_limits = {
+                    str(k): int(v)
+                    for k, v in limits.items()
+                    if isinstance(v, (int, float))
+                }
+            rt.used = int(data.get("used") or 0)
+
     # ------------------------------------------------------------ 状态
     def states(self) -> list[PolicyState]:
         now = datetime.now()
