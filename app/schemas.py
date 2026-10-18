@@ -320,6 +320,8 @@ class TokenResult(BaseModel):
 class DashboardOut(BaseModel):
     cd2: dict[str, Any] = Field(default_factory=dict)
     p115: dict[str, Any] = Field(default_factory=dict)
+    #: PT 流量总览（来自 Go 子服务），不可用时 available=false
+    pt: dict[str, Any] = Field(default_factory=dict)
     stats: dict[str, Any] = Field(default_factory=dict)
     scheduler: dict[str, Any] = Field(default_factory=dict)
 

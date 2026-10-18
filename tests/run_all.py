@@ -26,6 +26,7 @@ SUITES = [
     "test_instant_upload.py",
     "test_health.py",
     "test_btguard.py",
+    "test_pt_native.py",
 ]
 
 

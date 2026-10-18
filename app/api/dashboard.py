@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -15,8 +17,10 @@ from ..models import (
     UploadTaskSnapshot,
 )
 from ..schemas import DashboardOut
-from ..utils import local_day_start_ts, utcnow_ts
+from ..utils import get_logger, local_day_start_ts, utcnow_ts
 from .deps import cd2_client, db_session, p115_client, scheduler
+
+logger = get_logger("guard.api.dashboard")
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -124,6 +128,45 @@ async def dashboard(
         "total_rules": int(total_rules),
     }
 
+    # ---------------- PT 流量（来自 Go 子服务） ----------------
+    # 总览整合进仪表盘：用户不必为了看一眼上传速率切到另一个页面。
+    # 子服务不可用时给出 available=false，不影响整页渲染。
+    pt_view: dict[str, Any] = {"available": False, "running": False}
+    try:
+        from ..services.btguard import get_btg_manager
+
+        mgr = get_btg_manager()
+        if mgr.status.running:
+            st = await mgr.fetch_status()
+            agg = st.get("aggregate") or {}
+            clients = st.get("clients") or []
+            policies = st.get("policies") or []
+            pt_view = {
+                "available": True,
+                "running": True,
+                "up_speed": agg.get("up_speed", 0),
+                "dl_speed": agg.get("dl_speed", 0),
+                "up_total": agg.get("up_total", 0),
+                "window_bytes": agg.get("window_bytes", 0),
+                "peers": agg.get("peers", 0),
+                "torrents": agg.get("torrents", 0),
+                "client_count": len(clients),
+                "client_online": sum(1 for c in clients if c.get("healthy")),
+                "policy_count": len(policies),
+                "policy_limited": sum(
+                    1 for p in policies if p.get("limited")
+                ),
+            }
+        else:
+            pt_view = {
+                "available": mgr.is_available(),
+                "running": False,
+                "last_error": mgr.status.last_error,
+            }
+    except Exception as exc:  # noqa: BLE001 - PT 不可用不影响仪表盘
+        logger.debug("读取 PT 数据失败: %s", exc)
+        pt_view = {"available": False, "running": False, "last_error": str(exc)}
+
     # ---------------- 调度器 ----------------
     jobs: list[dict[str, object]] = []
     if getattr(sched, "scheduler", None) is not None and sched.scheduler.running:
@@ -147,6 +190,7 @@ async def dashboard(
     return DashboardOut(
         cd2=cd2_view,
         p115=p115_view,
+        pt=pt_view,
         stats=stats,
         scheduler=scheduler_view,
     )

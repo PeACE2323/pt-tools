@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .api import btguard, dashboard, p115, rules, settings, tasks, webhook
+from .api import btguard, dashboard, p115, pt, rules, settings, tasks, webhook
 from .config import STATIC_DIR
 from .models import init_db
 from .services.btguard import get_btg_manager
@@ -131,7 +131,8 @@ app.include_router(tasks.router)
 app.include_router(p115.router)
 app.include_router(settings.router)
 app.include_router(webhook.router)
-# BT 流量监控：/btg/* 反代 + /api/btg/status
+# PT 流量监控：原生数据接口（/api/pt/*）+ 保留 Go 面板直连（/btg/*）
+app.include_router(pt.router)
 app.include_router(btguard.router)
 
 

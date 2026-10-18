@@ -1095,10 +1095,15 @@ class GuardScheduler:
     # 定时健康检查
     # ======================================================================
     async def watch_btguard(self) -> None:
-        """BT 流量监控子服务的存活看护。
+        """PT 流量子服务的存活看护 + 事件汇入。
 
-        Go 子进程可能因内存、配置错误等原因退出。这里定期探测，
-        异常时按退避重启（逻辑在 ``BTGuardManager`` 内部）。
+        两件事：
+
+        1. **存活看护**：Go 子进程可能因内存、配置错误等原因退出，
+           异常时按退避重启（逻辑在 ``BTGuardManager`` 内部）。
+        2. **事件汇入**：把 Go 侧产生的策略事件（触发限速 / 解除限速）
+           写进 PTtools 统一的事件日志表，让用户在侧边栏「事件日志」
+           一处就能看到全部事件，而不必去两个地方翻。
         """
         try:
             from .btguard import get_btg_manager
@@ -1107,8 +1112,58 @@ class GuardScheduler:
             if not mgr.enabled:
                 return
             await mgr.probe_and_maybe_restart()
+
+            if mgr.status.running:
+                await self._import_pt_events(mgr)
         except Exception as exc:  # noqa: BLE001 - 看护失败不影响主流程
-            logger.debug("BT 子服务看护异常: %s", exc)
+            logger.debug("PT 子服务看护异常: %s", exc)
+
+    async def _import_pt_events(self, mgr) -> None:
+        """把 Go 侧新增的策略事件写入统一事件日志。
+
+        去重：用事件的时间 + 类型 + 策略名做签名，已导入过的跳过。
+        Go 侧最多保留有限条事件，所以维护一个有界的签名集合即可。
+        """
+        try:
+            events = await mgr.fetch_events(50)
+        except Exception:  # noqa: BLE001
+            return
+        if not events:
+            return
+
+        if not hasattr(self, "_pt_seen_events"):
+            self._pt_seen_events: set[str] = set()
+        seen = self._pt_seen_events
+
+        # 按时间正序处理，保证日志顺序自然
+        for ev in reversed(events):
+            key = "{}|{}|{}".format(
+                ev.get("time", ""), ev.get("type", ""), ev.get("policy", "")
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+
+            etype = str(ev.get("type", ""))
+            message = str(ev.get("message", "")) or f"PT 策略事件: {etype}"
+            level = "info"
+            if "limit" in etype or "trigger" in etype:
+                level = "warning"
+            elif "error" in etype or "fail" in etype:
+                level = "error"
+
+            detail = (
+                f"policy={ev.get('policy', '')} "
+                f"clients={','.join(ev.get('clients') or [])} "
+                f"window_bytes={ev.get('window_bytes', 0)} "
+                f"threshold={ev.get('threshold', 0)} "
+                f"limit={ev.get('old_limit', 0)}->{ev.get('new_limit', 0)}"
+            )
+            log_event(level, "pt-traffic", message, detail=detail)
+
+        # 有界，避免长期运行时无限增长
+        if len(seen) > 2000:
+            self._pt_seen_events = set(list(seen)[-1000:])
 
     async def health_check(self) -> None:
         """定期探测 CD2 与 115 的连通性，并更新仪表盘用的状态。

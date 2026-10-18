@@ -95,7 +95,7 @@
 
       <!-- ============ 仪表盘 ============ -->
       <div v-if="tab==='dashboard'" class="space-y-5">
-        <div class="grid grid-cols-2 lg:grid-cols-5 gap-4">
+        <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
           <div v-for="c in dashboardCards" :key="c.label"
                class="bg-white rounded-lg border border-slate-200 p-4">
             <div class="text-xs text-slate-500 mb-1">{{ c.label }}</div>
@@ -597,58 +597,147 @@
         </div>
       </div>
 
-      <!-- ============ BT 流量监控 ============ -->
-      <div v-if="tab==='bt'" class="space-y-3">
-        <!-- 子服务状态条 -->
-        <div class="flex flex-wrap items-center gap-3 text-sm">
-          <span :class="['inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs',
-            btg.healthy ? 'bg-emerald-100 text-emerald-700'
-            : btg.running ? 'bg-amber-100 text-amber-700'
-            : 'bg-rose-100 text-rose-700']">
-            <span :class="['w-2 h-2 rounded-full',
-              btg.healthy ? 'bg-emerald-500'
-              : btg.running ? 'bg-amber-500' : 'bg-rose-500']"></span>
-            {{ btg.healthy ? '运行中' : btg.running ? '启动中/异常' : '未运行' }}
-          </span>
-          <span v-if="btg.pid" class="text-xs text-slate-400 mono">PID {{ btg.pid }}</span>
-          <span v-if="btg.restart_count" class="text-xs text-amber-600">已重启 {{ btg.restart_count }} 次</span>
-          <div class="flex-1"></div>
-          <button @click="reloadBtgFrame()" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs">
-            重新载入
-          </button>
-          <button @click="restartBtg()" :disabled="btgBusy"
-            class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs disabled:opacity-50">
-            {{ btgBusy ? '重启中…' : '重启子服务' }}
-          </button>
+      <!-- ============ PT 策略（流量监控） ============ -->
+      <div v-if="tab==='pt'" class="space-y-5">
+        <!-- 子服务异常提示 -->
+        <div v-if="!pt.running"
+          :class="['rounded-lg p-4 text-sm border',
+            pt.available ? 'bg-rose-50 border-rose-200 text-rose-800'
+                         : 'bg-amber-50 border-amber-200 text-amber-800']">
+          <div class="font-medium mb-1">
+            {{ pt.available ? 'PT 流量子服务未运行' : 'PT 流量监控不可用' }}
+          </div>
+          <p class="text-xs leading-relaxed break-all">{{ pt.last_error || '未配置或尚未启动' }}</p>
+          <div class="flex gap-2 mt-2">
+            <button @click="restartPt()" :disabled="ptBusy"
+              class="px-3 py-1.5 bg-white border rounded text-xs disabled:opacity-50">
+              {{ ptBusy ? '处理中…' : '尝试启动' }}
+            </button>
+            <button @click="switchTab('settings')"
+              class="px-3 py-1.5 bg-white border rounded text-xs">去配置</button>
+          </div>
         </div>
 
-        <!-- 未安装 -->
-        <div v-if="!btg.available"
-          class="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
-          <div class="font-medium mb-1">BT 流量监控未安装</div>
-          <p class="text-xs leading-relaxed">
-            镜像构建时未包含 Go 子服务二进制（<code class="mono">bt-traffic-guard</code>）。
-            这通常发生在用源码直接运行、或用 <code class="mono">--target runtime</code>
-            跳过 Go 编译阶段时。CD2 与 115 功能不受影响。
-          </p>
-        </div>
+        <template v-else>
+          <!-- 实时速率 -->
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div v-for="c in ptCards" :key="c.label"
+                 class="bg-white rounded-lg border border-slate-200 p-4">
+              <div class="text-xs text-slate-500 mb-1">{{ c.label }}</div>
+              <div :class="['text-2xl font-semibold', c.color || 'text-slate-800']">{{ c.value }}</div>
+              <div class="text-[11px] text-slate-400 mt-1">{{ c.hint }}</div>
+            </div>
+          </div>
 
-        <!-- 未运行 -->
-        <div v-else-if="!btg.running"
-          class="bg-rose-50 border border-rose-200 rounded-lg p-4 text-sm text-rose-800">
-          <div class="font-medium mb-1">BT 流量子服务未运行</div>
-          <p class="text-xs leading-relaxed break-all">{{ btg.last_error || '未知原因' }}</p>
-          <button @click="restartBtg()" class="mt-2 px-3 py-1.5 bg-white border border-rose-300 rounded text-xs">
-            尝试启动
-          </button>
-        </div>
+          <!-- 策略进度 -->
+          <div class="bg-white rounded-lg border border-slate-200 p-5">
+            <h3 class="font-medium mb-3 flex items-center gap-2">
+              限速策略
+              <span v-if="!policies.length" class="text-xs text-slate-400 font-normal">（尚未配置）</span>
+            </h3>
+            <div v-if="policies.length" class="space-y-3">
+              <div v-for="p in policies" :key="p.name"
+                   class="border border-slate-200 rounded-lg p-3">
+                <div class="flex flex-wrap items-center gap-2 mb-2">
+                  <span class="font-medium text-sm">{{ p.name }}</span>
+                  <span :class="['text-[11px] px-1.5 py-0.5 rounded',
+                    p.limited ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700']">
+                    {{ p.limited ? '已限速' : '运行中' }}
+                  </span>
+                  <span v-if="!p.enabled"
+                    class="text-[11px] px-1.5 py-0.5 rounded bg-slate-200 text-slate-600">已停用</span>
+                  <span class="text-[11px] text-slate-400">{{ p.window_label }}</span>
+                  <div class="flex-1"></div>
+                  <button @click="ptPolicyAction(p.name, p.limited ? 'resume' : 'trigger')"
+                    class="text-xs px-2 py-1 rounded bg-slate-100 hover:bg-slate-200">
+                    {{ p.limited ? '解除限速' : '手动触发' }}
+                  </button>
+                </div>
+                <!-- 进度条 -->
+                <div class="flex items-center gap-2">
+                  <div class="flex-1 h-2 bg-slate-200 rounded overflow-hidden">
+                    <div :class="['h-full transition-all',
+                      p.progress_total >= 100 ? 'bg-rose-500'
+                      : p.progress_total >= 80 ? 'bg-amber-500' : 'bg-emerald-500']"
+                      :style="{width: Math.min(100, p.progress_total || 0) + '%'}"></div>
+                  </div>
+                  <span class="text-xs mono text-slate-600 w-16 text-right">
+                    {{ (p.progress_total || 0).toFixed(1) }}%
+                  </span>
+                </div>
+                <div class="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-[11px] text-slate-500">
+                  <span>已用 <b class="text-slate-700">{{ fmtSize(p.current_total) }}</b>
+                    / {{ fmtSize(p.threshold_total) }}</span>
+                  <span>限速至 <b class="text-slate-700">{{ fmtSpeed(p.limit_total) }}</b></span>
+                  <span v-if="p.limited && p.limited_for">已限速 {{ p.limited_for }}</span>
+                  <span v-if="p.last_error" class="text-rose-600">{{ p.last_error }}</span>
+                </div>
+              </div>
+            </div>
+            <div v-else class="text-sm text-slate-400 py-4">
+              还没有配置任何限速策略。请到
+              <button @click="switchTab('settings')" class="text-sky-600 hover:underline">系统设置 → PT 流量</button>
+              里添加下载器与策略。
+            </div>
+          </div>
 
-        <!-- 正常：内嵌 Go 侧面板 -->
-        <div v-else class="bg-white rounded-lg border border-slate-200 overflow-hidden">
-          <iframe :key="btgFrameKey" :src="btgFrameUrl"
-            class="w-full border-0" style="height: calc(100vh - 220px); min-height: 640px"
-            title="BT 流量监控"></iframe>
-        </div>
+          <!-- 下载器明细 -->
+          <div class="bg-white rounded-lg border border-slate-200 overflow-hidden">
+            <div class="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
+              <h3 class="font-medium">下载器</h3>
+              <span class="text-xs text-slate-400">
+                {{ pt.client_online }} / {{ pt.client_count }} 在线
+              </span>
+            </div>
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+                <tr>
+                  <th class="px-4 py-2.5 text-left">名称</th>
+                  <th class="px-4 py-2.5 text-left">类型</th>
+                  <th class="px-4 py-2.5 text-left">状态</th>
+                  <th class="px-4 py-2.5 text-right">上传速度</th>
+                  <th class="px-4 py-2.5 text-right">窗口流量</th>
+                  <th class="px-4 py-2.5 text-right">限速</th>
+                  <th class="px-4 py-2.5 text-right">做种</th>
+                  <th class="px-4 py-2.5 text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="c in clients" :key="c.name" class="border-t border-slate-100">
+                  <td class="px-4 py-2.5 font-medium max-w-[12rem] truncate" :title="c.name">{{ c.name }}</td>
+                  <td class="px-4 py-2.5 text-xs text-slate-500">{{ c.type }}</td>
+                  <td class="px-4 py-2.5">
+                    <span :class="['text-[11px] px-1.5 py-0.5 rounded',
+                      c.healthy ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700']">
+                      {{ c.healthy ? '在线' : '离线' }}
+                    </span>
+                    <div v-if="c.last_error" class="text-[10px] text-rose-500 mt-0.5 max-w-[14rem] truncate"
+                      :title="c.last_error">{{ c.last_error }}</div>
+                  </td>
+                  <td class="px-4 py-2.5 text-right mono text-xs">{{ fmtSpeed(c.up_speed) }}</td>
+                  <td class="px-4 py-2.5 text-right mono text-xs">{{ fmtSize(c.window_bytes) }}</td>
+                  <td class="px-4 py-2.5 text-right mono text-xs">
+                    <span :class="c.current_up_limit > 0 ? 'text-amber-600' : 'text-slate-400'">
+                      {{ c.current_up_limit > 0 ? fmtSpeed(c.current_up_limit) : '不限' }}
+                    </span>
+                  </td>
+                  <td class="px-4 py-2.5 text-right text-xs text-slate-500">{{ c.torrents ?? '—' }}</td>
+                  <td class="px-4 py-2.5 text-right">
+                    <button @click="ptTestClient(c.name)" :disabled="ptTesting === c.name"
+                      class="text-sky-600 hover:underline text-xs disabled:opacity-50">
+                      {{ ptTesting === c.name ? '测试中…' : '测试' }}
+                    </button>
+                  </td>
+                </tr>
+                <tr v-if="!clients.length">
+                  <td colspan="8" class="px-4 py-10 text-center text-slate-400 text-sm">
+                    还没有配置下载器。请到「系统设置 → PT 流量」添加。
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
       </div>
 
       <!-- ============ 系统设置 ============ -->
@@ -772,6 +861,63 @@
               {{ testing.p115?'测试中…':'连接测试' }}
             </button>
           </div>
+        </div>
+
+        <!-- PT 流量（Traffic Guard）-->
+        <div class="bg-white rounded-lg border border-slate-200 p-5">
+          <h3 class="font-medium mb-2 flex items-center gap-2">
+            PT 流量监控
+            <span v-if="pt.running"
+              class="text-[11px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-normal">运行中</span>
+            <span v-else-if="pt.available"
+              class="text-[11px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-normal">未运行</span>
+            <span v-else
+              class="text-[11px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 font-normal">不可用</span>
+          </h3>
+          <p class="text-xs text-slate-500 mb-3 leading-relaxed">
+            监控 qBittorrent / Transmission 的上传流量，达到阈值自动限速、新周期自动恢复。
+            下方的配置以 <strong>YAML</strong> 形式直接编辑——这样能完整表达下载器、策略、
+            通知等全部结构，不受界面字段数量的限制。
+          </p>
+
+          <div v-if="!pt.available"
+            class="mb-3 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+            当前环境未包含 PT 子服务二进制（源码方式运行时会这样）。用 Docker 镜像部署即可获得完整功能。
+          </div>
+
+          <div class="flex flex-wrap gap-2 mb-2 items-center">
+            <button @click="loadPtConfig()" :disabled="ptCfgBusy"
+              class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs disabled:opacity-50">
+              {{ ptCfgBusy ? '加载中…' : '重新加载配置' }}
+            </button>
+            <button @click="fillPtExample()" :disabled="ptCfgBusy"
+              class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs disabled:opacity-50">
+              填入配置模板
+            </button>
+            <div class="flex-1"></div>
+            <span v-if="ptCfgDirty" class="text-[11px] text-amber-600">有未保存的修改</span>
+          </div>
+
+          <textarea v-model="ptCfgYaml" rows="16" spellcheck="false"
+            placeholder="点击「填入配置模板」或「重新加载配置」开始"
+            class="w-full px-3 py-2 border border-slate-300 rounded-md text-xs mono resize-y focus:outline-none focus:ring-2 focus:ring-emerald-400"></textarea>
+
+          <div class="flex flex-wrap gap-2 mt-2 items-center">
+            <button @click="savePtConfig()" :disabled="ptCfgBusy || !pt.running"
+              class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md text-xs disabled:opacity-50">
+              {{ ptCfgBusy ? '保存中…' : '保存并生效' }}
+            </button>
+            <button @click="restartPt()" :disabled="ptBusy"
+              class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs disabled:opacity-50">
+              {{ ptBusy ? '重启中…' : '重启子服务' }}
+            </button>
+            <a href="/btg/" target="_blank" rel="noopener"
+               class="px-3 py-1.5 text-sky-600 hover:underline text-xs">打开原始面板 ↗</a>
+          </div>
+          <p class="text-[11px] text-slate-400 mt-2">
+            保存后会热重载，不会丢失当前周期进度与限速状态。
+            「原始面板」是子服务自带的完整界面，本页字段不够用时可去那里操作。
+          </p>
         </div>
 
         <!-- Webhook -->
@@ -1085,13 +1231,13 @@ createApp({
       { key: 'rules',     label: 'CD2 规则', icon: '⚙️', desc: '配置源路径关键字、超时阈值与重试策略' },
       { key: 'tasks',     label: '任务监控', icon: '📤', desc: '实时上传、秒传记录与重试队列' },
       { key: 'p115',      label: '115 云下载', icon: '☁️', desc: '云下载任务、超时阈值与取消日志' },
-      { key: 'logs',      label: '事件日志', icon: '📋', desc: '系统事件、异常与任务操作记录' },
-      { key: 'bt',        label: 'BT 流量', icon: '📶', desc: 'qBittorrent / Transmission 上传流量监控与自动限速' },
-      { key: 'settings',  label: '系统设置', icon: '🔧', desc: 'CD2 / 115 连接配置与 Webhook' },
+      { key: 'logs',      label: '事件日志', icon: '📋', desc: '系统事件、异常、任务操作与 PT 策略事件（统一汇总）' },
+      { key: 'pt',        label: 'PT 策略', icon: '📶', desc: '上传流量监控与限速策略' },
+      { key: 'settings',  label: '系统设置', icon: '🔧', desc: 'CD2 / 115 / PT 流量配置与 Webhook' },
     ];
 
     const dash = reactive({
-      cd2: {}, p115: {}, stats: {}, scheduler: { jobs: [] },
+      cd2: {}, p115: {}, pt: {}, stats: {}, scheduler: { jobs: [] },
     });
     const rules = ref([]);
     const liveTasks = ref([]);
@@ -1103,15 +1249,27 @@ createApp({
     // ---- 事件日志页 ----
     const logLevel = ref('');
 
-    // ---- BT 流量页 ----
-    // 子服务是独立的 Go 程序，自带完整 UI，通过 /btg/* 反代嵌入 iframe。
-    // 这样 Go 侧代码零改动、功能 100% 保留。
-    const btg = reactive({
-      available: false, running: false, healthy: false,
-      enabled: true, pid: 0, restart_count: 0, last_error: '',
+    // ---- PT 策略页 ----
+    // 数据来自 /api/pt/*（Python 侧代理 Go 子服务的 JSON 接口），
+    // 用 PTtools 自己的界面渲染，而不是 iframe 套壳 —— 这样主题、
+    // 导航、交互才和其它页面一致。
+    const pt = reactive({
+      available: false, running: false, last_error: '',
+      version: '', uptime: '',
+      up_speed: 0, dl_speed: 0, up_total: 0, window_bytes: 0,
+      peers: 0, torrents: 0,
+      client_count: 0, client_online: 0,
+      policy_count: 0, policy_limited: 0,
     });
-    const btgBusy = ref(false);
-    const btgFrameKey = ref(0);
+    const clients = ref([]);
+    const policies = ref([]);
+    const ptBusy = ref(false);
+    const ptTesting = ref('');
+    // PT 配置（YAML 原文）
+    const ptCfgYaml = ref('');
+    const ptCfgOriginal = ref('');
+    const ptCfgBusy = ref(false);
+    const ptCfgDirty = computed(() => ptCfgYaml.value !== ptCfgOriginal.value);
     const logAutoRefresh = ref(false);
     const logLevels = [
       { key: 'error',   label: '错误' },
@@ -1268,9 +1426,14 @@ createApp({
           await loadP115Config();
           if (p115Tab.value === 'logs') await loadCancelLogs(cancelLogsPage.page);
         }
-        if (tab.value === 'settings') await loadSettings();
+        if (tab.value === 'settings') {
+          await loadSettings();
+          // 进入设置页时顺带刷新 PT 状态；配置内容按需加载（避免覆盖用户正在编辑的内容）
+          if (!pt.running || !pt.available) await loadPt();
+          else if (!ptCfgYaml.value && !ptCfgDirty.value) await loadPtConfig();
+        }
         if (tab.value === 'logs') await loadEvents();
-        if (tab.value === 'bt') await loadBtgStatus();
+        if (tab.value === 'pt') await loadPt();
         lastRefresh.value = Date.now();
       } catch (e) {
         showToast('刷新失败：' + e.message, 'error');
@@ -1279,45 +1442,166 @@ createApp({
       }
     };
 
-    // ---------- BT 流量 ----------
-    const btgFrameUrl = computed(() => '/btg/');
+    // ---------- PT 策略 ----------
+    const ptCards = computed(() => [
+      {
+        label: '上传速度',
+        value: fmtSpeed(pt.up_speed),
+        hint: `预测的累计 ${fmtSize(pt.up_total)}`,
+        color: 'text-emerald-600',
+      },
+      {
+        label: '本周期流量',
+        value: fmtSize(pt.window_bytes),
+        hint: '按策略周期统计',
+        color: 'text-sky-600',
+      },
+      {
+        label: '下载器',
+        value: `${pt.client_online} / ${pt.client_count}`,
+        hint: '在线 / 总数',
+        color: pt.client_online < pt.client_count && pt.client_count > 0
+          ? 'text-amber-600' : 'text-slate-800',
+      },
+      {
+        label: '限速中',
+        value: `${pt.policy_limited} / ${pt.policy_count}`,
+        hint: '已限速 / 策略总数',
+        color: pt.policy_limited > 0 ? 'text-rose-600' : 'text-slate-800',
+      },
+    ]);
 
-    const loadBtgStatus = async () => {
+    const loadPt = async () => {
       try {
-        const d = await api('GET', '/api/btg/status');
-        Object.assign(btg, d);
+        const ov = await api('GET', '/api/pt/overview');
+        Object.assign(pt, ov);
+        if (!ov.running) {
+          clients.value = [];
+          policies.value = [];
+          return;
+        }
+        // 并行取明细，任一失败不影响其它
+        const [cls, pls] = await Promise.all([
+          api('GET', '/api/pt/clients').catch(() => []),
+          api('GET', '/api/pt/policies').catch(() => []),
+        ]);
+        clients.value = cls || [];
+        policies.value = pls || [];
       } catch (e) {
-        btg.running = false;
-        btg.healthy = false;
-        btg.last_error = e.message;
+        pt.running = false;
+        pt.last_error = e.message;
+        clients.value = [];
+        policies.value = [];
       }
     };
 
-    const reloadBtgFrame = () => {
-      // 改 key 强制 iframe 重新挂载，绕过缓存
-      btgFrameKey.value += 1;
-      loadBtgStatus();
+    const ptPolicyAction = async (name, action) => {
+      const label = action === 'resume' ? '解除限速' : '手动触发';
+      if (action === 'trigger' && !confirm(`确认手动触发策略「${name}」？\n会立即对相关下载器限速。`)) return;
+      try {
+        const r = await api('POST', `/api/pt/policy/${action}?name=${encodeURIComponent(name)}`);
+        showToast(r.message || `${label}成功`, 'success');
+        await loadPt();
+      } catch (e) {
+        showToast(`${label}失败：` + e.message, 'error');
+      }
     };
 
-    const restartBtg = async () => {
-      btgBusy.value = true;
+    const ptTestClient = async (name) => {
+      ptTesting.value = name;
+      try {
+        const r = await api('GET', `/api/pt/client/test?name=${encodeURIComponent(name)}`);
+        showToast(
+          r.message || (r.ok ? `${name} 连接正常` : `${name} 连接失败`),
+          r.ok ? 'success' : 'error'
+        );
+      } catch (e) {
+        showToast('测试失败：' + e.message, 'error');
+      } finally {
+        ptTesting.value = '';
+      }
+    };
+
+    const restartPt = async () => {
+      ptBusy.value = true;
       try {
         const r = await api('POST', '/api/btg/restart');
-        showToast(r.message || (r.ok ? '已重启' : '重启失败'), r.ok ? 'success' : 'error');
-        await loadBtgStatus();
-        // 子服务需要几秒才可用，稍后再刷新一次 iframe
-        setTimeout(() => { btgFrameKey.value += 1; loadBtgStatus(); }, 3000);
+        showToast(r.message || (r.ok ? '已启动' : '启动失败'), r.ok ? 'success' : 'error');
+        // 子服务需要几秒初始化
+        setTimeout(() => loadPt(), 3000);
       } catch (e) {
-        showToast('重启失败：' + e.message, 'error');
+        showToast('启动失败：' + e.message, 'error');
       } finally {
-        btgBusy.value = false;
+        ptBusy.value = false;
+      }
+    };
+
+    // 速率格式化：字节/秒 → 人类可读
+    const fmtSpeed = (bps) => {
+      const n = Number(bps) || 0;
+      if (n <= 0) return '0 B/s';
+      return fmtSize(n) + '/s';
+    };
+
+    // ---------- PT 配置（系统设置内） ----------
+    const loadPtConfig = async () => {
+      if (!pt.running) {
+        // 子服务没起来时读不到配置，先给出明确提示而不是静默失败
+        showToast('PT 子服务未运行，无法读取配置', 'error');
+        return;
+      }
+      ptCfgBusy.value = true;
+      try {
+        const r = await api('GET', '/api/pt/config');
+        ptCfgYaml.value = r.yaml || '';
+        ptCfgOriginal.value = ptCfgYaml.value;
+      } catch (e) {
+        showToast('读取配置失败：' + e.message, 'error');
+      } finally {
+        ptCfgBusy.value = false;
+      }
+    };
+
+    const fillPtExample = async () => {
+      ptCfgBusy.value = true;
+      try {
+        const r = await api('GET', '/api/pt/config/example');
+        if (!r.yaml) {
+          showToast(r.error || '未找到配置模板', 'error');
+          return;
+        }
+        ptCfgYaml.value = r.yaml;
+        showToast('已填入模板，按需修改后保存', 'success');
+      } catch (e) {
+        showToast('获取模板失败：' + e.message, 'error');
+      } finally {
+        ptCfgBusy.value = false;
+      }
+    };
+
+    const savePtConfig = async () => {
+      if (!ptCfgYaml.value.trim()) {
+        showToast('配置内容不能为空', 'error');
+        return;
+      }
+      ptCfgBusy.value = true;
+      try {
+        const r = await api('PUT', '/api/pt/config', { yaml: ptCfgYaml.value });
+        showToast(r.message || '配置已保存并生效', 'success');
+        ptCfgOriginal.value = ptCfgYaml.value;
+        await loadPt();
+      } catch (e) {
+        // 配置语法错误是常见情况，直接把后端返回的原因显示出来
+        showToast('保存失败：' + e.message, 'error');
+      } finally {
+        ptCfgBusy.value = false;
       }
     };
 
     // ---------- 页签与 URL 同步 ----------
     // 把当前页签写进 URL hash（如 #tasks），刷新后能回到原页。
     // 之前没有做这件事，刷新总是跳回仪表盘。
-    const TAB_KEYS = ['dashboard', 'rules', 'tasks', 'p115', 'logs', 'bt', 'settings'];
+    const TAB_KEYS = ['dashboard', 'rules', 'tasks', 'p115', 'logs', 'pt', 'settings'];
 
     const readTabFromHash = () => {
       const raw = (location.hash || '').replace(/^#\/?/, '').trim();
@@ -1572,13 +1856,30 @@ createApp({
     // ---------- 计算属性 ----------
     const dashboardCards = computed(() => {
       const s = dash.stats || {};
-      return [
+      const p = dash.pt || {};
+      const cards = [
         { label: '今日秒传', value: s.today_instant ?? 0, hint: `累计 ${s.total_instant ?? 0} 条`, color: 'text-emerald-600' },
         { label: '当前上传中', value: s.live_uploads ?? 0, hint: '监控范围内的任务', color: 'text-sky-600' },
         { label: '等待重试', value: (s.waiting_retry ?? 0) + (s.retrying ?? 0), hint: `失败 ${s.retry_failed ?? 0} 条`, color: 'text-amber-600' },
         { label: '今日云下载取消', value: s.today_cancelled_offline ?? 0, hint: `累计 ${s.total_cancelled_offline ?? 0} 条`, color: 'text-rose-600' },
         { label: '启用规则', value: s.enabled_rules ?? 0, hint: `共 ${s.total_rules ?? 0} 条`, color: 'text-indigo-600' },
       ];
+      // PT 流量总览：仅在子服务可用时展示，避免仪表盘出现一排 0 误导用户
+      if (p.running) {
+        cards.push({
+          label: 'PT 上传速度',
+          value: fmtSpeed(p.up_speed),
+          hint: `本周期 ${fmtSize(p.window_bytes)}`,
+          color: 'text-emerald-600',
+        });
+        cards.push({
+          label: 'PT 下载器',
+          value: `${p.client_online ?? 0}/${p.client_count ?? 0}`,
+          hint: `限速中 ${p.policy_limited ?? 0} 个策略`,
+          color: (p.policy_limited ?? 0) > 0 ? 'text-rose-600' : 'text-slate-800',
+        });
+      }
+      return cards;
     });
     const currentTab = computed(() => tabs.find(t => t.key === tab.value) || tabs[0]);
     const taskSubTabs = computed(() => [
@@ -1719,7 +2020,9 @@ body = '''
       rules, liveTasks, instantPage, nonInstantPage, offlineTasks, cancelLogsPage,
       events, settings, form, p115Config, taskTab, p115Tab, taskSubTabs, p115SubTabs,
       logLevel, logLevels, logAutoRefresh, logLevelLabel, logLevelClass,
-      btg, btgBusy, btgFrameKey, btgFrameUrl, reloadBtgFrame, restartBtg,
+      pt, clients, policies, ptCards, ptBusy, ptTesting,
+      loadPt, ptPolicyAction, ptTestClient, restartPt, fmtSpeed,
+      ptCfgYaml, ptCfgBusy, ptCfgDirty, loadPtConfig, fillPtExample, savePtConfig,
       instantQuery, retryQuery, retryStatus, selectedRetry, allRetrySelected,
       ruleEditor, dashboardCards, thresholdHours, webhookUrl, testing,
       retryStatChips,

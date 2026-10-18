@@ -360,6 +360,132 @@ class BTGuardManager:
         """健康后重置退避计数。"""
         self._restart_index = 0
 
+    # ------------------------------------------------------------ 数据访问
+    #
+    # 下面这些方法让 PTtools 用**自己的界面**渲染 BT 的数据，
+    # 而不是把 Go 的整页 iframe 套进来。这样两边的观感、主题、
+    # 交互才是一致的，也才能真正叫「整合」。
+
+    async def _get_json(self, path: str, params: dict | None = None) -> dict:
+        """向子服务取 JSON。失败抛 ``_proxy_unavailable``。"""
+        import httpx
+
+        try:
+            resp = await self._client().get(path, params=params)
+        except httpx.HTTPError as exc:
+            raise _proxy_unavailable(str(exc)) from exc
+        if resp.status_code >= 400:
+            raise _proxy_unavailable(
+                f"{path} 返回 {resp.status_code}: {resp.text[:200]}"
+            )
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise _proxy_unavailable(f"{path} 返回的不是 JSON") from exc
+        return data if isinstance(data, dict) else {"data": data}
+
+    async def fetch_status(self) -> dict:
+        """``/api/status``：实时速率、客户端明细、策略进度。"""
+        return await self._get_json("/api/status")
+
+    async def fetch_events(self, limit: int = 100) -> list[dict]:
+        """``/api/events``：策略触发/解除等事件。"""
+        data = await self._get_json("/api/events", {"limit": limit})
+        events = data.get("events")
+        return events if isinstance(events, list) else []
+
+    async def fetch_history(self, client: str = "") -> list[dict]:
+        """``/api/history``：采样曲线。``client`` 为空表示聚合曲线。"""
+        data = await self._get_json("/api/history", {"client": client})
+        samples = data.get("samples")
+        return samples if isinstance(samples, list) else []
+
+    async def fetch_config(self) -> dict:
+        """``/api/config``：脱敏后的结构化配置。"""
+        return await self._get_json("/api/config")
+
+    async def fetch_config_yaml(self) -> str:
+        """``/api/config/raw``：原始 YAML 文本。
+
+        写配置时用 YAML 而不是逐字段映射：Go 侧的配置结构字段很多
+        （客户端、策略、通知、鉴权…），逐个映射既易漏又容易随版本漂移，
+        直接读写 YAML 能保证语义完整。
+        """
+        import httpx
+
+        try:
+            resp = await self._client().get("/api/config/raw")
+        except httpx.HTTPError as exc:
+            raise _proxy_unavailable(str(exc)) from exc
+        if resp.status_code >= 400:
+            raise _proxy_unavailable(
+                f"/api/config/raw 返回 {resp.status_code}"
+            )
+        return resp.text
+
+    async def save_config_yaml(self, yaml_text: str) -> dict:
+        """``POST /api/config/raw``：保存 YAML 并热重载。"""
+        import httpx
+
+        try:
+            resp = await self._client().post(
+                "/api/config/raw", json={"yaml": yaml_text}
+            )
+        except httpx.HTTPError as exc:
+            raise _proxy_unavailable(str(exc)) from exc
+        if resp.status_code >= 400:
+            detail = resp.text[:300]
+            try:
+                payload = resp.json()
+                detail = payload.get("error") or payload.get("message") or detail
+            except ValueError:
+                pass
+            raise _proxy_unavailable(f"保存失败: {detail}")
+        try:
+            return resp.json()
+        except ValueError:
+            return {"ok": True}
+
+    async def policy_action(self, action: str, name: str) -> dict:
+        """策略操作：``resume``（解除限速）或 ``trigger``（手动触发）。"""
+        import httpx
+
+        if action not in ("resume", "trigger"):
+            raise ValueError(f"不支持的操作: {action}")
+        try:
+            resp = await self._client().post(
+                f"/api/policy/{action}", params={"name": name}
+            )
+        except httpx.HTTPError as exc:
+            raise _proxy_unavailable(str(exc)) from exc
+        if resp.status_code >= 400:
+            detail = resp.text[:300]
+            try:
+                payload = resp.json()
+                detail = payload.get("error") or payload.get("message") or detail
+            except ValueError:
+                pass
+            raise _proxy_unavailable(detail)
+        try:
+            return resp.json()
+        except ValueError:
+            return {"ok": True}
+
+    async def test_client(self, name: str) -> dict:
+        """测试某个下载器的连通性。"""
+        import httpx
+
+        try:
+            resp = await self._client().get(
+                "/api/client/test", params={"name": name}
+            )
+        except httpx.HTTPError as exc:
+            raise _proxy_unavailable(str(exc)) from exc
+        try:
+            return resp.json()
+        except ValueError:
+            return {"ok": resp.status_code < 400}
+
     # ------------------------------------------------------------ 关闭
     async def close(self) -> None:
         await self.stop()

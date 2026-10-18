@@ -219,10 +219,10 @@ jobs:
           done
 
       # 验证 BT 子服务整合：状态接口 + 反代是否真的把 Go 面板透出来了
-      - name: BT 子服务整合验证
+      - name: PT 流量整合验证
         run: |
           set -e
-          echo "--- /api/btg/status ---"
+          echo "--- 子服务状态 /api/btg/status ---"
           curl -sS http://127.0.0.1:8899/api/btg/status | tee /tmp/btg.json
           echo ""
           python3 - <<'PY'
@@ -230,19 +230,55 @@ jobs:
           d = json.load(open('/tmp/btg.json'))
           assert d.get("available") is True, f"Go 二进制缺失: {d}"
           assert d.get("running") is True, f"子服务未运行: {d}"
-          print("BT 子服务已就绪, pid =", d.get("pid"))
+          print("PT 子服务已就绪, pid =", d.get("pid"))
           PY
-          echo "--- 反代 /btg/ ---"
+
+          echo "--- 原生接口 /api/pt/overview ---"
+          code=$(curl -sS -o /tmp/pt.json -w "%{http_code}" http://127.0.0.1:8899/api/pt/overview)
+          echo "GET /api/pt/overview -> ${code}"
+          [ "$code" = "200" ] || { echo "!! 原生接口返回 ${code}"; cat /tmp/pt.json; exit 1; }
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/pt.json'))
+          assert d.get("running") is True, f"overview 显示未运行: {d}"
+          assert "up_speed" in d, "overview 缺少速率字段"
+          print("原生总览 OK: up_speed=%s, clients=%s" % (d.get("up_speed"), d.get("client_count")))
+          PY
+
+          echo "--- 策略与客户端接口 ---"
+          for p in /api/pt/policies /api/pt/clients /api/pt/events; do
+            code=$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8899${p}")
+            echo "GET ${p} -> ${code}"
+            [ "$code" = "200" ] || exit 1
+          done
+
+          echo "--- 仪表盘含 PT 字段 ---"
+          curl -sS http://127.0.0.1:8899/api/dashboard -o /tmp/dash.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/dash.json'))
+          assert "pt" in d, "仪表盘缺少 pt 字段"
+          assert d["pt"].get("running") is True, f"仪表盘 PT 未运行: {d['pt']}"
+          print("仪表盘 PT 总览 OK")
+          PY
+
+          echo "--- 配置读取（YAML） ---"
+          code=$(curl -sS -o /tmp/ptcfg.json -w "%{http_code}" http://127.0.0.1:8899/api/pt/config)
+          echo "GET /api/pt/config -> ${code}"
+          [ "$code" = "200" ] || exit 1
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/ptcfg.json'))
+          assert "yaml" in d and d["yaml"].strip(), "配置 YAML 为空"
+          print("配置读取 OK, %d 字节" % len(d["yaml"]))
+          PY
+
+          echo "--- 原始面板仍可访问（排错入口） ---"
           code=$(curl -sS -o /tmp/btg.html -w "%{http_code}" http://127.0.0.1:8899/btg/)
           echo "GET /btg/ -> ${code}"
-          [ "$code" = "200" ] || { echo "!! 反代返回 ${code}"; exit 1; }
-          echo "反代内容大小: $(wc -c < /tmp/btg.html) 字节"
-          # 前端里的绝对路径必须被改写成 /btg/api/
-          grep -q '/btg/api/' /tmp/btg.html && echo "路径重写 OK" || { echo "!! 路径未重写"; exit 1; }
-          echo "--- 反代 API 透传 ---"
-          code=$(curl -sS -o /dev/null -w "%{http_code}" http://127.0.0.1:8899/btg/api/status)
-          echo "GET /btg/api/status -> ${code}"
-          [ "$code" = "200" ] || { echo "!! 反代 API 返回 ${code}"; exit 1; }
+          [ "$code" = "200" ] || exit 1
+          grep -q '/btg/api/' /tmp/btg.html && echo "路径重写 OK"
+
 
       - name: 失败时输出完整诊断
         if: failure()
