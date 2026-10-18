@@ -80,6 +80,21 @@ fi
 # ---- PT 流量监控：纯 Python 实现，无需额外二进制 ----
 echo "[entrypoint] PT 流量监控 : 内置模块（无需子进程）"
 
+# ---- 清理旧版本残留 ----
+# 早期版本用 Go 子服务，会在数据卷里留一个 btguard/ 目录（含 YAML 配置与
+# 历史数据）。现在 PT 配置改为存 SQLite，这个目录已无任何代码引用。
+# 只在确认是旧残留、且里面有 config.yaml 时才提示，不擅自删除用户数据。
+LEGACY_BTG="${DATA_DIR}/btguard"
+if [ -d "${LEGACY_BTG}" ]; then
+  if [ -f "${LEGACY_BTG}/config/config.yaml" ]; then
+    echo "[entrypoint] 发现旧版 Go 子服务残留目录: ${LEGACY_BTG}"
+    echo "[entrypoint] 其中的配置已不再被读取（PT 配置现存放在 guard.db）"
+    echo "[entrypoint] 确认无用后可手动删除：rm -rf ${LEGACY_BTG}"
+  else
+    echo "[entrypoint] 发现空残留目录: ${LEGACY_BTG}（可删除）"
+  fi
+fi
+
 # ---- 数据库路径兜底 ----
 export GUARD_DB_PATH="${GUARD_DB_PATH:-${DATA_DIR}/guard.db}"
 echo "[entrypoint] database  : ${GUARD_DB_PATH}"

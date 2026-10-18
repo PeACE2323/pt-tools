@@ -298,6 +298,59 @@ def test_qb_origin_with_api_key():
     print("✓ API Key 模式也带同源头")
 
 
+# ---------------------------------------------------------------- 前端语义
+# 这几个是"脏标记"引发的连锁 bug，静态检查抓不到，只能靠断言源码。
+
+
+def test_dirty_flag_initial_value():
+    """「原始快照」初值必须是 '[]'，不能是空字符串。
+
+    若为 ''，则 JSON.stringify([]) === '[]' !== ''，dirty 恒为真，导致：
+      1. 刷新后永远不会自动加载已保存的下载器（看起来像没保存上）
+      2. 一进页面就显示「有未保存的修改」
+      3. 用户以为没保存成功，再添加一个，保存时把旧列表整体覆盖
+    """
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    assert "const ptFormOriginal = ref('[]')" in ui, "ptFormOriginal 初值应为 '[]'"
+    assert "const ptPolicyOriginal = ref('[]')" in ui, (
+        "ptPolicyOriginal 初值应为 '[]'"
+    )
+    print("✓ 脏标记初值为 '[]'（不会误报未保存）")
+
+
+def test_pt_add_client_matches_normalize():
+    """新增下载器的对象字段必须与 _normalizeClients 一致。"""
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    # 截取 ptAddClient 与 _normalizeClients 两段
+    add_idx = ui.find("const ptAddClient")
+    norm_idx = ui.find("const _normalizeClients")
+    assert add_idx > 0 and norm_idx > 0
+    add_block = ui[add_idx : add_idx + 900]
+    for field in ("clear_password", "clear_api_key", "supports_api_key"):
+        assert field in add_block, f"ptAddClient 缺少 {field}（会导致脏标记误判）"
+    print("✓ 新增下载器字段与规范化输出一致")
+
+
+def test_policy_page_loads_clients():
+    """PT 策略页必须加载下载器列表，否则「作用下载器」下拉为空。"""
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    idx = ui.find("if (tab.value === 'pt')")
+    assert idx > 0
+    block = ui[idx : idx + 500]
+    assert "loadPtForm()" in block, (
+        "PT 策略页未加载下载器列表，「作用下载器」会无法选择"
+    )
+    print("✓ PT 策略页加载下载器列表")
+
+
+def test_dashboard_uses_new_monitor():
+    """仪表盘不得再引用已删除的 Go 模块。"""
+    dash = (ROOT / "app" / "api" / "dashboard.py").read_text(encoding="utf-8")
+    assert "btguard" not in dash, "dashboard 仍引用已删除的 btguard"
+    assert "get_pt_monitor" in dash
+    print("✓ 仪表盘使用新监控器")
+
+
 def test_qb_no_auto_redirect():
     """不能自动跟随重定向：Host 变化会让 Referer 校验失效。"""
     src = (ROOT / "app" / "services" / "bt_client.py").read_text(encoding="utf-8")

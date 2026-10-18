@@ -1576,7 +1576,13 @@ createApp({
     // ---- PT 下载器配置（系统设置页）----
     // 用结构化表单而非 YAML 文本：字段类型明确、有校验、不会写错缩进。
     const ptClients = ref([]);
-    const ptFormOriginal = ref('');
+    // 「原始快照」用于判断是否有未保存的修改。
+    //
+    // 关键：初值必须是 '[]'（空数组的序列化），不能是 ''。
+    // 若为 ''，那么 JSON.stringify([]) === '[]' !== '' 会让 dirty 恒为真，
+    // 导致：① 刷新后永远不会自动加载已保存的配置（看起来像"没保存上"）；
+    //      ② 一进页面就显示"有未保存的修改"。
+    const ptFormOriginal = ref('[]');
     const ptFormBusy = ref(false);
     const ptFormDirty = computed(
       () => JSON.stringify(ptClients.value) !== ptFormOriginal.value
@@ -1584,7 +1590,7 @@ createApp({
 
     // ---- PT 限速策略（PT 策略页）----
     const ptPolicies = ref([]);
-    const ptPolicyOriginal = ref('');
+    const ptPolicyOriginal = ref('[]');
     const ptPolicyBusy = ref(false);
     const ptPolicyDirty = computed(
       () => JSON.stringify(ptPolicies.value) !== ptPolicyOriginal.value
@@ -1758,6 +1764,9 @@ createApp({
         if (tab.value === 'logs') await loadEvents();
         if (tab.value === 'pt') {
           await loadPt();
+          // 「作用下载器」下拉需要下载器列表，这里必须一并加载。
+          // 之前只加载了策略，导致多选框永远是空的、无法选择。
+          if (!ptFormDirty.value) await loadPtForm();
           // 策略配置按需加载，避免覆盖正在编辑的内容
           if (!ptPolicyDirty.value) await loadPtPolicies();
         }
@@ -1923,6 +1932,10 @@ createApp({
         username: '',
         password: '',
         api_key: '',
+        // 必须与 _normalizeClients 的输出保持完全一致，
+        // 否则「未保存」判断会因为字段差异误报。
+        clear_password: false,
+        clear_api_key: false,
         enabled: true,
         insecure_skip_verify: false,
         timeout: '10s',
