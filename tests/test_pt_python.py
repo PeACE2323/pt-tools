@@ -229,6 +229,43 @@ def test_shutdown_resumes_limits():
     print("✓ 退出时恢复上传限速")
 
 
+def test_used_not_polluting_baseline():
+    """已用量必须单独存，不能塞进 baseline。
+
+    早期实现把「本周期已用」写成 ``baseline["__used__"]``，
+    结果 states() 里 ``sum(baseline.values())`` 把已用量又累加一次，
+    进度条显示翻倍。这里锁死正确行为。
+    """
+    from app.services.bt_policy import PolicyEngine
+
+    engine = PolicyEngine()
+    engine.apply_config([PolicyConfig(name="p", threshold_total=1000)])
+    rt = engine._runtimes["p"]  # noqa: SLF001
+
+    # 模拟一轮：两个客户端，基线各 100，当前各 300 → 已用 400
+    rt.baseline = {"a": 100, "b": 100}
+    rt.used = 400
+
+    states = engine.states()
+    assert len(states) == 1
+    assert states[0].current_total == 400, states[0].current_total
+    assert "__used__" not in rt.baseline, "已用量不应污染 baseline"
+    print("✓ 已用量不污染 baseline（进度不翻倍）")
+
+
+def test_progress_percentage():
+    """进度按 已用/阈值 计算。"""
+    from app.services.bt_policy import PolicyEngine
+
+    engine = PolicyEngine()
+    engine.apply_config([PolicyConfig(name="p", threshold_total=1000)])
+    rt = engine._runtimes["p"]  # noqa: SLF001
+    rt.used = 250
+    st = engine.states()[0]
+    assert st.progress_total == 25.0, st.progress_total
+    print("✓ 进度百分比正确")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

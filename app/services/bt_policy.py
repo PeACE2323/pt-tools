@@ -259,6 +259,12 @@ class PolicyRuntime:
     limited_at: float = 0.0
     # 限速前的原始限速，用于恢复
     original_limits: dict[str, int] = field(default_factory=dict)
+    # 最近一次算出的「本周期已用」
+    #
+    # 注意：必须与 baseline 分开存。早期实现把已用量塞进 baseline
+    # （用 "__used__" 作键），结果 states() 里 sum(baseline.values())
+    # 会把已用量重复累加，进度条显示翻倍。
+    used: int = 0
 
 
 # ===========================================================================
@@ -314,7 +320,7 @@ class PolicyEngine:
         for rt in self._runtimes.values():
             cfg = rt.config
             start, end = window_bounds(cfg.align, parse_duration(cfg.window), now)
-            total = sum(rt.baseline.values())
+            total = rt.used
             progress = (
                 (total / cfg.threshold_total * 100.0)
                 if cfg.threshold_total > 0
@@ -411,7 +417,7 @@ class PolicyEngine:
                 current = int(snap.get("up_total") or 0)
                 used += max(0, current - base)
 
-            rt.baseline["__used__"] = used  # 仅用于状态展示
+            rt.used = used
 
             if rt.limited:
                 continue
@@ -425,9 +431,8 @@ class PolicyEngine:
         """下发限速。"""
         cfg = rt.config
         targets = [
-            name
-            for name in rt.baseline
-            if name != "__used__" and cfg.applies_to(name) and name in clients
+            name for name in rt.baseline
+            if cfg.applies_to(name) and name in clients
         ]
         if not targets:
             return
@@ -541,10 +546,7 @@ class PolicyEngine:
             raise ValueError(f"未找到策略 {name}")
         if rt.limited:
             return False
-        used = sum(
-            v for k, v in rt.baseline.items() if k != "__used__"
-        )
-        await self._limit(rt, clients, used)
+        await self._limit(rt, clients, rt.used)
         return True
 
 
