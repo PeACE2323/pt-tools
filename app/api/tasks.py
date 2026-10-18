@@ -22,8 +22,10 @@ from ..schemas import (
     Page,
     UploadTaskOut,
 )
-from ..utils import local_day_start_ts, utcnow_ts
+from ..utils import get_logger, local_day_start_ts, utcnow_ts
 from .deps import db_session, scheduler
+
+logger = get_logger("guard.api.tasks")
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -99,12 +101,73 @@ def list_instant(
         .limit(page_size)
         .all()
     )
+
+    # 显式逐条构造，避免依赖 ORM 对象被 Pydantic 直接读取。
+    # 若某条记录有异常字段（如 None），单条失败不应让整页空白，
+    # 这里逐条容错并记录，保证「有数据就能看到」。
+    items: list[InstantUploadOut] = []
+    for r in rows:
+        try:
+            items.append(InstantUploadOut.model_validate(r))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "秒传记录 %s 序列化失败，已跳过: %s",
+                getattr(r, "id", "?"),
+                exc,
+            )
+
     return Page[InstantUploadOut](
-        items=[InstantUploadOut.model_validate(r) for r in rows],
+        items=items,
         total=int(total),
         page=page,
         page_size=page_size,
     )
+
+
+@router.get("/instant/debug", summary="诊断：秒传记录统计与查询是否一致")
+async def debug_instant(
+    session: Session = Depends(db_session),
+) -> dict:
+    """排查「角标有数字但列表为空」。
+
+    返回数据库里实际有多少条、今日多少条、以及列表接口会返回的前几条的
+    关键字段，便于判断问题出在统计口径、查询还是序列化。
+    """
+    from sqlalchemy import text
+
+    day_start = local_day_start_ts()
+
+    total = (
+        session.query(func.count(InstantUpload.id)).scalar() or 0
+    )
+    today = (
+        session.query(func.count(InstantUpload.id))
+        .filter(InstantUpload.finished_at >= day_start)
+        .scalar()
+        or 0
+    )
+
+    # 直接走原生 SQL 取样，绕过 ORM，确认表里确实有数据
+    sample: list[dict] = []
+    try:
+        rows = session.execute(
+            text(
+                "SELECT id, file_name, size, transferred_bytes, "
+                "finished_at, rule_name FROM instant_uploads "
+                "ORDER BY finished_at DESC LIMIT 5"
+            )
+        ).mappings()
+        sample = [dict(r) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        sample = [{"error": str(exc)}]
+
+    return {
+        "total": int(total),
+        "today": int(today),
+        "day_start_ts": day_start,
+        "now_ts": utcnow_ts(),
+        "sample": sample,
+    }
 
 
 @router.delete("/instant", response_model=ActionResult, summary="清空秒传记录")
@@ -270,10 +333,17 @@ def task_summary(session: Session = Depends(db_session)) -> dict[str, object]:
         .scalar()
         or 0
     )
+    # 秒传记录总数：标签页角标用它，与列表页口径保持一致。
+    # 之前角标用「今日数」、列表用「全部数」，两者会对不上：
+    # 用户看到角标有数字，点进去列表却是空的（记录不是今天的）。
+    total_instant = (
+        session.query(func.count(InstantUpload.id)).scalar() or 0
+    )
 
     return {
         "live": int(live_count),
         "today_instant": int(today_instant),
+        "total_instant": int(total_instant),
         "non_instant": {
             "waiting": int(non_instant_counts.get("waiting", 0)),
             "retrying": int(non_instant_counts.get("retrying", 0)),

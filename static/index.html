@@ -521,7 +521,15 @@
                 </tr>
                 <tr v-if="!instantPage.items.length">
                   <td colspan="7" class="px-4 py-10 text-center text-slate-400 text-sm">
-                    暂无秒传记录
+                    <!-- 有总数但列表为空：多半是页码越界或数据异常，
+                         给出可操作提示而不是一句「暂无」误导用户 -->
+                    <template v-if="instantPage.total > 0">
+                      共 {{ instantPage.total }} 条记录，但当前页没有数据
+                      <button @click="loadInstant(1)" class="ml-2 text-sky-600 hover:underline">回到第 1 页</button>
+                    </template>
+                    <template v-else>
+                      {{ instantQuery ? '没有匹配「' + instantQuery + '」的记录' : '暂无秒传记录' }}
+                    </template>
                   </td>
                 </tr>
               </tbody>
@@ -2518,7 +2526,7 @@ createApp({
     const currentTab = computed(() => tabs.find(t => t.key === tab.value) || tabs[0]);
     const taskSubTabs = computed(() => [
       { key: 'live', label: '实时上传', count: dash.stats?.live_uploads || 0 },
-      { key: 'instant', label: '秒传详情', count: dash.stats?.today_instant || 0 },
+      { key: 'instant', label: '秒传详情', count: dash.stats?.total_instant || 0 },
       { key: 'retry', label: '重试队列', count: (dash.stats?.waiting_retry || 0) + (dash.stats?.retrying || 0) },
     ]);
 

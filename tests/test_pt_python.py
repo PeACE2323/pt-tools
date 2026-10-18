@@ -521,6 +521,57 @@ def test_startup_polls_immediately():
     print("✓ 启动时立即采集（不必等 30 秒）")
 
 
+# ---------------------------------------------------------------- 任务监控
+def test_instant_badge_matches_list():
+    """秒传详情角标必须与列表口径一致。
+
+    角标原先用 today_instant（今日数），列表展示的是全部记录。
+    记录不是今天产生时，角标有数字但列表为空——用户看到的就是
+    「有数字但没有详细信息」。
+    """
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    api = (ROOT / "app" / "api" / "tasks.py").read_text(encoding="utf-8")
+
+    # 后端要提供总数
+    assert '"total_instant"' in api, "后端未提供 total_instant"
+
+    # 前端角标要用总数
+    idx = ui.find("{ key: 'instant'")
+    assert idx > 0
+    seg = ui[idx : idx + 120]
+    assert "total_instant" in seg, (
+        f"角标未使用 total_instant，实际: {seg.strip()[:80]}"
+    )
+    assert "today_instant" not in seg, "角标仍用今日数，与列表口径不一致"
+    print("✓ 秒传角标与列表口径一致")
+
+
+def test_instant_empty_state_actionable():
+    """列表为空但总数不为 0 时应给出可操作提示。"""
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    idx = ui.find("暂无秒传记录")
+    assert idx > 0
+    seg = ui[max(0, idx - 700) : idx + 100]
+    assert "instantPage.total > 0" in seg, "缺少「有总数但列表空」的提示分支"
+    print("✓ 空列表给出可操作提示")
+
+
+def test_instant_list_tolerates_bad_row():
+    """单条记录序列化失败不应让整页空白。"""
+    api = (ROOT / "app" / "api" / "tasks.py").read_text(encoding="utf-8")
+    idx = api.find("def list_instant")
+    seg = api[idx : idx + 1800]
+    assert "try:" in seg and "model_validate(r)" in seg, "缺少逐条容错"
+    print("✓ 列表逐条容错（单条异常不影响整页）")
+
+
+def test_instant_debug_endpoint():
+    """提供诊断端点，便于排查统计与查询不一致。"""
+    api = (ROOT / "app" / "api" / "tasks.py").read_text(encoding="utf-8")
+    assert "/instant/debug" in api, "缺少诊断端点"
+    print("✓ 秒传诊断端点")
+
+
 def test_qb_no_auto_redirect():
     """不能自动跟随重定向：Host 变化会让 Referer 校验失效。"""
     src = (ROOT / "app" / "services" / "bt_client.py").read_text(encoding="utf-8")
