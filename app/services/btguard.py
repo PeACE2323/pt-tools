@@ -413,8 +413,17 @@ class BTGuardManager:
         return await self._get_json("/api/config/form")
 
     async def save_form_config(self, payload: dict) -> dict:
-        """``PUT /api/config/form``：按结构化载荷保存并热重载。"""
+        """``PUT /api/config/form``：按结构化载荷保存并热重载。
+
+        这里会先做一次「清空凭据」的语义转换：Go 侧用空串表示「未修改」，
+        所以要清空密码必须传一个哨兵值（``\\u0000__CLEAR__\\u0000``）。
+        前端不方便直接传不可见字符，故约定：载荷里带
+        ``clear_password: true`` / ``clear_api_key: true`` 时，
+        由本方法替换成哨兵值。
+        """
         import httpx
+
+        payload = _apply_clear_flags(payload)
 
         try:
             resp = await self._client().put("/api/config/form", json=payload)
@@ -529,6 +538,55 @@ class BTGuardManager:
 # ===========================================================================
 # 反向代理（供 FastAPI 路由使用）
 # ===========================================================================
+#: Go 侧用于表示「显式清空凭据」的哨兵值（见 btguard/internal/web/form.go）
+CLEAR_TOKEN = "\u0000__CLEAR__\u0000"
+
+
+def _apply_clear_flags(payload: dict) -> dict:
+    """把前端的 ``clear_password`` / ``clear_api_key`` 翻译成 Go 的哨兵值。
+
+    Go 侧约定：空串 = 未修改（避免误清空已保存的密码）。
+    因此要真正清空，必须传 ``CLEAR_TOKEN``。
+
+    前端用不可见字符不现实，改用布尔标记，在这里统一转换。
+    """
+    if not isinstance(payload, dict):
+        return payload
+
+    clients = payload.get("clients")
+    if not isinstance(clients, list):
+        return payload
+
+    out_clients = []
+    for c in clients:
+        if not isinstance(c, dict):
+            out_clients.append(c)
+            continue
+        item = dict(c)
+        # 这些是前端专有的控制字段，不能传给 Go
+        clear_pw = bool(item.pop("clear_password", False))
+        clear_key = bool(item.pop("clear_api_key", False))
+        # 只读派生字段也不该提交
+        for k in (
+            "has_password", "has_api_key", "api_key_hint",
+            "supports_api_key", "auth_mode", "status_text",
+            "last_error", "healthy", "up_speed", "current_up_limit",
+            "version",
+        ):
+            item.pop(k, None)
+
+        if clear_pw:
+            item["password"] = CLEAR_TOKEN
+        if clear_key:
+            item["api_key"] = CLEAR_TOKEN
+
+        out_clients.append(item)
+
+    out = dict(payload)
+    out["clients"] = out_clients
+    return out
+
+
 def rewrite_html(html: str, prefix: str = PROXY_PREFIX) -> str:
     """把 Go 前端里写死的绝对路径改成带前缀的路径。
 

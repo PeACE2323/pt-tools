@@ -1146,18 +1146,24 @@
                     密码
                     <span v-if="c.has_password" class="text-slate-400">（已设置，留空不修改）</span>
                   </label>
-                  <input v-model="c.password" type="password"
+                  <input v-model="c.password" type="password" :disabled="c.clear_password"
                     :placeholder="c.has_password ? '••••••••' : ''"
-                    class="w-full px-2 py-1 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                    class="w-full px-2 py-1 border border-slate-300 rounded text-sm disabled:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                  <label v-if="c.has_password" class="flex items-center gap-1 text-[11px] text-slate-500 mt-1">
+                    <input type="checkbox" v-model="c.clear_password" class="rounded"> 清除已保存的密码
+                  </label>
                 </div>
                 <div v-if="c.supports_api_key" class="sm:col-span-2">
                   <label class="block text-xs text-slate-500 mb-1">
                     API Key（qBittorrent 5.2.0+，可选）
                     <span v-if="c.has_api_key" class="text-slate-400">（已设置 {{ c.api_key_hint }}，留空不修改）</span>
                   </label>
-                  <input v-model="c.api_key" placeholder="qbt_xxxxxxxx"
-                    class="w-full px-2 py-1 border border-slate-300 rounded text-sm mono focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                  <input v-model="c.api_key" placeholder="qbt_xxxxxxxx" :disabled="c.clear_api_key"
+                    class="w-full px-2 py-1 border border-slate-300 rounded text-sm mono disabled:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-400">
                   <p class="text-[11px] text-slate-400 mt-1">填写后走 Bearer 认证，优先于用户名密码</p>
+                  <label v-if="c.has_api_key" class="flex items-center gap-1 text-[11px] text-slate-500 mt-1">
+                    <input type="checkbox" v-model="c.clear_api_key" class="rounded"> 清除已保存的 API Key
+                  </label>
                 </div>
                 <div class="sm:col-span-2 flex flex-wrap items-center gap-4">
                   <label class="flex items-center gap-1 text-xs text-slate-600">
@@ -1859,6 +1865,10 @@ createApp({
         // 密码/API Key：Go 侧返回的是脱敏值，留空表示不修改
         password: '',
         api_key: '',
+        // 「显式清除」标记：Go 侧用空串表示"未修改"，
+        // 所以清空必须走单独的哨兵语义（后端会转换成 CLEAR_TOKEN）
+        clear_password: false,
+        clear_api_key: false,
         enabled: c.enabled !== false,
         insecure_skip_verify: !!c.insecure_skip_verify,
         timeout: c.timeout || '10s',
@@ -1870,15 +1880,17 @@ createApp({
       }));
     };
 
-    /** 提交时去掉只读字段，避免后端校验报错 */
+    /** 提交时只保留 Go 侧认得的字段 */
     const _payloadClients = (list) => {
       return (list || []).map((c) => ({
         name: c.name,
         type: c.type,
         url: c.url,
         username: c.username,
-        password: c.password || '',
-        api_key: c.api_key || '',
+        password: c.clear_password ? '' : (c.password || ''),
+        api_key: c.clear_api_key ? '' : (c.api_key || ''),
+        clear_password: !!c.clear_password,
+        clear_api_key: !!c.clear_api_key,
         enabled: c.enabled,
         insecure_skip_verify: c.insecure_skip_verify,
         timeout: c.timeout || '10s',
