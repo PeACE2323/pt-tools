@@ -415,7 +415,7 @@
       <!-- ============ 任务监控 ============ -->
       <div v-if="tab==='tasks'" class="space-y-4">
         <div class="flex gap-1 bg-slate-100 p-1 rounded-lg w-fit text-sm">
-          <button v-for="s in taskSubTabs" :key="s.key" @click="taskTab=s.key"
+          <button v-for="s in taskSubTabs" :key="s.key" @click="switchTaskTab(s.key)"
             :class="['px-4 py-1.5 rounded-md transition',
               taskTab===s.key?'bg-white shadow-sm font-medium':'text-slate-600 hover:text-slate-900']">
             {{ s.label }}
@@ -674,7 +674,7 @@
         </div>
 
         <div class="flex gap-1 bg-slate-100 p-1 rounded-lg w-fit text-sm">
-          <button v-for="s in p115SubTabs" :key="s.key" @click="p115Tab=s.key"
+          <button v-for="s in p115SubTabs" :key="s.key" @click="switchP115Tab(s.key)"
             :class="['px-4 py-1.5 rounded-md transition',
               p115Tab===s.key?'bg-white shadow-sm font-medium':'text-slate-600 hover:text-slate-900']">
             {{ s.label }}
@@ -2198,16 +2198,55 @@ createApp({
       return TAB_KEYS.includes(key) ? key : 'dashboard';
     };
 
+    //: 任务监控的三个子页签，用于从 hash 恢复
+    const TASK_SUB_KEYS = ['live', 'instant', 'retry'];
+
+    const readSubTabFromHash = (mainKey) => {
+      const raw = (location.hash || '').replace(/^#\/?/, '').trim();
+      const parts = raw.split('/');
+      if (parts[0] !== mainKey || parts.length < 2) return '';
+      const sub = parts[1];
+      if (mainKey === 'tasks') {
+        return TASK_SUB_KEYS.includes(sub) ? sub : '';
+      }
+      if (mainKey === 'p115') {
+        return ['list', 'logs'].includes(sub) ? sub : '';
+      }
+      return '';
+    };
+
     const writeTabToHash = (key) => {
-      const target = `#${key}`;
+      // 子页签也写进 hash，刷新后才能回到原来的子页
+      let target = `#${key}`;
+      if (key === 'tasks' && taskTab.value !== 'live') {
+        target = `#tasks/${taskTab.value}`;
+      } else if (key === 'p115' && p115Tab.value !== 'list') {
+        target = `#p115/${p115Tab.value}`;
+      }
       if (location.hash !== target) {
         // 用 replaceState 避免污染浏览器前进/后退历史
         try {
           history.replaceState(null, '', target);
         } catch {
-          location.hash = key;
+          location.hash = target.slice(1);
         }
       }
+    };
+
+    /**
+     * 切换任务监控的子页签。
+     *
+     * 之前是直接 ``taskTab=s.key``，纯前端切换不触发任何加载：
+     * 刷新页面后子页签被重置为「实时上传」，用户再点「秒传详情」时
+     * 列表从未请求过接口，于是显示「暂无记录」；
+     * 只有点右上角「刷新」才会真正加载。
+     */
+    const switchTaskTab = async (key) => {
+      taskTab.value = key;
+      writeTabToHash('tasks');
+      if (key === 'live') await loadLive();
+      else if (key === 'instant') await loadInstant(instantPage.page || 1);
+      else if (key === 'retry') await loadNonInstant(nonInstantPage.page || 1);
     };
 
     const switchTab = async (key) => {
@@ -2216,11 +2255,29 @@ createApp({
       await refreshAll();
     };
 
+    /**
+     * 切换 115 云下载的子页签。
+     *
+     * 与任务监控同理：直接改 p115Tab 不会触发加载，
+     * 切到「取消日志」会看到空列表，必须点刷新才出来。
+     */
+    const switchP115Tab = async (key) => {
+      p115Tab.value = key;
+      writeTabToHash('p115');
+      if (key === 'logs') await loadCancelLogs(cancelLogsPage.page || 1);
+      else await loadOffline();
+    };
+
     // 浏览器前进/后退时同步页签
     const onHashChange = async () => {
       const key = readTabFromHash();
+      const sub = readSubTabFromHash(key);
       if (key !== tab.value) {
         tab.value = key;
+        if (sub) {
+          if (key === 'tasks') taskTab.value = sub;
+          else if (key === 'p115') p115Tab.value = sub;
+        }
         await refreshAll();
       }
     };
@@ -2630,8 +2687,13 @@ body = '''
     // ---------- 定时器 ----------
     let timer = null;
     onMounted(async () => {
-      // 先按 URL hash 恢复页签，再拉数据（避免先渲染仪表盘再跳走）
+      // 先按 URL hash 恢复页签（含子页签），再拉数据，避免先渲染再跳走
       tab.value = readTabFromHash();
+      const sub = readSubTabFromHash(tab.value);
+      if (sub) {
+        if (tab.value === 'tasks') taskTab.value = sub;
+        else if (tab.value === 'p115') p115Tab.value = sub;
+      }
       writeTabToHash(tab.value);
       window.addEventListener('hashchange', onHashChange);
 
@@ -2661,6 +2723,7 @@ body = '''
       version, tab, tabs, currentTab, loading, saving, toast, dash, dashReady, lastRefreshText,
       rules, liveTasks, instantPage, nonInstantPage, offlineTasks, cancelLogsPage,
       events, settings, form, p115Config, taskTab, p115Tab, taskSubTabs, p115SubTabs,
+      switchTaskTab, switchP115Tab,
       logLevel, logLevels, logAutoRefresh, logLevelLabel, logLevelClass,
       pt, clients, policies, ptCards, ptTesting,
       loadPt, ptPolicyAction, ptTestClient, fmtSpeed,

@@ -572,6 +572,51 @@ def test_instant_debug_endpoint():
     print("✓ 秒传诊断端点")
 
 
+def test_subtab_switch_triggers_load():
+    """切换子页签必须加载对应数据。
+
+    原先按钮直接 ``taskTab=s.key``，纯前端切换不发请求：
+    刷新后子页签被重置为「实时上传」，用户再点「秒传详情」时
+    列表从未请求过，显示「暂无记录」；只有点右上角「刷新」
+    （走 refreshAll）才真正加载。这正是用户报告的现象。
+    """
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    # 任务监控子页签必须走 switchTaskTab
+    assert '@click="taskTab=s.key"' not in ui, (
+        "子页签仍在直接赋值，不会触发数据加载"
+    )
+    assert '@click="switchTaskTab(s.key)"' in ui, "缺少 switchTaskTab"
+
+    # 115 子页签同理
+    assert '@click="p115Tab=s.key"' not in ui, "115 子页签仍在直接赋值"
+    assert '@click="switchP115Tab(s.key)"' in ui, "缺少 switchP115Tab"
+
+    # 两个切换函数内部要真正调用加载
+    for fn, loader in (
+        ("switchTaskTab", "loadInstant"),
+        ("switchP115Tab", "loadCancelLogs"),
+    ):
+        idx = ui.find(f"const {fn} = async")
+        assert idx > 0, f"未找到 {fn}"
+        seg = ui[idx : idx + 700]
+        assert loader in seg, f"{fn} 未调用 {loader}"
+    print("✓ 子页签切换会加载数据（修复需手动刷新）")
+
+
+def test_subtab_persisted_in_hash():
+    """子页签要写进 URL hash，刷新后才能回到原来的子页。"""
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    assert "TASK_SUB_KEYS" in ui, "缺少子页签键列表"
+    assert "readSubTabFromHash" in ui, "缺少从 hash 恢复子页签"
+    assert "#tasks/" in ui, "hash 未包含子页签"
+    # onMounted 要恢复子页签
+    idx = ui.find("onMounted(async () => {")
+    seg = ui[idx : idx + 900]
+    assert "readSubTabFromHash" in seg, "启动时未恢复子页签"
+    print("✓ 子页签写入 hash（刷新保持）")
+
+
 def test_qb_no_auto_redirect():
     """不能自动跟随重定向：Host 变化会让 Referer 校验失效。"""
     src = (ROOT / "app" / "services" / "bt_client.py").read_text(encoding="utf-8")
