@@ -44,9 +44,13 @@ logger = get_logger("guard.api.pt")
 router = APIRouter(prefix="/api/pt", tags=["pt-traffic"])
 
 
-def _unavailable(exc: Exception) -> HTTPException:
-    """把子服务异常统一转成 503，便于前端区分「服务没起来」和「接口报错」。"""
-    return HTTPException(status_code=503, detail=f"PT 流量子服务不可用: {exc}")
+def _unavailable(reason: object) -> HTTPException:
+    """把子服务异常统一转成 503。
+
+    前端据此可以区分「服务没起来」（503）和「参数/配置错误」（400），
+    从而给出不同的提示。
+    """
+    return HTTPException(status_code=503, detail=f"PT 流量子服务不可用: {reason}")
 
 
 # ===========================================================================
@@ -117,7 +121,7 @@ async def pt_clients(
     mgr: BTGuardManager = Depends(get_btg_manager),
 ) -> list[dict[str, Any]]:
     if not mgr.status.running:
-        raise _unavailable(Exception(mgr.status.last_error or "未运行"))
+        raise _unavailable(mgr.status.last_error or "未运行")
     try:
         st = await mgr.fetch_status()
     except _proxy_unavailable as exc:
@@ -131,7 +135,7 @@ async def pt_client_test(
     mgr: BTGuardManager = Depends(get_btg_manager),
 ) -> dict[str, Any]:
     if not mgr.status.running:
-        raise _unavailable(Exception("子服务未运行"))
+        raise _unavailable("子服务未运行")
     try:
         return await mgr.test_client(name)
     except _proxy_unavailable as exc:
@@ -146,7 +150,7 @@ async def pt_policies(
     mgr: BTGuardManager = Depends(get_btg_manager),
 ) -> list[dict[str, Any]]:
     if not mgr.status.running:
-        raise _unavailable(Exception(mgr.status.last_error or "未运行"))
+        raise _unavailable(mgr.status.last_error or "未运行")
     try:
         st = await mgr.fetch_status()
     except _proxy_unavailable as exc:
@@ -166,7 +170,7 @@ async def pt_policy_action(
     if action not in ("resume", "trigger"):
         raise HTTPException(400, "action 只能是 resume 或 trigger")
     if not mgr.status.running:
-        raise _unavailable(Exception("子服务未运行"))
+        raise _unavailable("子服务未运行")
     try:
         return await mgr.policy_action(action, name)
     except _proxy_unavailable as exc:
@@ -198,9 +202,7 @@ async def pt_get_config(
     mgr: BTGuardManager = Depends(get_btg_manager),
 ) -> dict[str, Any]:
     if not mgr.status.running:
-        raise _unavailable(
-            Exception(mgr.status.last_error or "子服务未运行，无法读取配置")
-        )
+        raise _unavailable(mgr.status.last_error or "子服务未运行，无法读取配置")
     try:
         text = await mgr.fetch_config_yaml()
     except _proxy_unavailable as exc:
@@ -220,7 +222,7 @@ async def pt_put_config(
     mgr: BTGuardManager = Depends(get_btg_manager),
 ) -> dict[str, Any]:
     if not mgr.status.running:
-        raise _unavailable(Exception("子服务未运行"))
+        raise _unavailable("子服务未运行")
     try:
         return await mgr.save_config_yaml(payload.yaml)
     except _proxy_unavailable as exc:
