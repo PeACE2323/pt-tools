@@ -83,6 +83,24 @@ echo "[entrypoint] PT 流量监控 : 内置模块（无需子进程）"
 # ---- 数据库路径兜底 ----
 export GUARD_DB_PATH="${GUARD_DB_PATH:-${DATA_DIR}/guard.db}"
 echo "[entrypoint] database  : ${GUARD_DB_PATH}"
+
+# ---- 数据卷检查 ----
+# 如果这里是空库，几乎一定是 -v 没挂到 /app/data：
+# 容器每次重建都会从零开始，用户会看到「配置全丢了」。
+if [ -f "${GUARD_DB_PATH}" ]; then
+  DB_SIZE=$(wc -c < "${GUARD_DB_PATH}" 2>/dev/null || echo 0)
+  echo "[entrypoint] 数据库已存在 : ${DB_SIZE} 字节（配置会保留）"
+else
+  echo "[entrypoint] 数据库不存在 : 将新建空库"
+  echo "[entrypoint] !! 如果你之前保存过配置，请确认启动命令包含"
+  echo "[entrypoint] !!   -v /你的目录:/app/data"
+  echo "[entrypoint] !! 否则容器重建后配置会全部丢失"
+fi
+# 挂载卷可写性
+if [ ! -w "${DATA_DIR}" ]; then
+  echo "[entrypoint] !! 数据目录不可写 (${DATA_DIR})，配置将无法保存" >&2
+fi
+
 echo "[entrypoint] starting  : $*"
 echo "[entrypoint] ===== exec ===== "
 

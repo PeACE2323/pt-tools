@@ -266,6 +266,71 @@ async def pt_put_policies(
 # ===========================================================================
 # 辅助
 # ===========================================================================
+@router.get("/debug/storage", summary="诊断：查看 PT 配置在数据库中的实际存储")
+async def pt_debug_storage(
+    session: Session = Depends(db_session),
+) -> dict[str, Any]:
+    """排查「重启后配置丢失」用的诊断端点。
+
+    返回：
+
+    * 数据库文件的**绝对路径**（确认是否落在挂载卷上）
+    * 文件是否存在、大小、最后修改时间
+    * ``app_settings`` 表里 ``pt.clients`` / ``pt.policies`` 的**原始内容**
+    * 当前进程内存里加载到的配置
+
+    如果这里显示有数据、但界面上是空的，说明是前端或加载逻辑问题；
+    如果这里也是空的，说明写入没落盘（多半是数据卷没挂对）。
+    """
+    from pathlib import Path
+
+    from ..config import DB_PATH
+    from ..models import AppSetting
+    from ..services.bt_monitor import load_pt_config
+
+    db = Path(DB_PATH)
+    info: dict[str, Any] = {
+        "db_path": str(db),
+        "db_exists": db.is_file(),
+        "db_size": db.stat().st_size if db.is_file() else 0,
+        "db_mtime": _iso(
+            db.stat().st_mtime if db.is_file() else 0
+        ),
+        "data_dir_env": "",
+        "db_path_env": "",
+    }
+
+    import os
+
+    info["data_dir_env"] = os.environ.get("DATA_DIR", "(未设置)")
+    info["db_path_env"] = os.environ.get("GUARD_DB_PATH", "(未设置)")
+
+    rows: dict[str, str] = {}
+    try:
+        for key in ("pt.clients", "pt.policies"):
+            row = session.get(AppSetting, key)
+            rows[key] = (row.value if row else "")[:500]
+    except Exception as exc:  # noqa: BLE001
+        info["read_error"] = str(exc)
+
+    info["raw"] = rows
+
+    try:
+        clients, policies = load_pt_config(session)
+        info["loaded_clients"] = len(clients)
+        info["loaded_policies"] = len(policies)
+        info["client_names"] = [c.get("name") for c in clients]
+        info["policy_names"] = [p.get("name") for p in policies]
+    except Exception as exc:  # noqa: BLE001
+        info["load_error"] = str(exc)
+
+    monitor = _monitor()
+    info["memory_clients"] = monitor.client_names
+    info["memory_policies"] = [c.name for c in monitor.engine.configs()]
+
+    return info
+
+
 def _mask(secret: str) -> str:
     if not secret:
         return ""

@@ -79,15 +79,24 @@
       </div>
     </header>
 
-    <!-- 全局提示 -->
+    <!-- 全局提示：固定定位，不随页面滚动 -->
+    <!--
+      之前提示放在文档流里，页面一长（比如系统设置）往下滚就看不到，
+      点「测试连接」后完全不知道结果。改为 fixed 贴在视口右下角，
+      始终可见且不遮挡页面顶部的操作区。
+    -->
     <transition name="fade">
       <div v-if="toast.text"
-        :class="['mx-6 mt-3 px-4 py-2 rounded-md text-sm flex items-center justify-between',
-          toast.type==='error' ? 'bg-rose-50 text-rose-700 border border-rose-200'
-          : toast.type==='success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-          : 'bg-sky-50 text-sky-700 border border-sky-200']">
-        <span>{{ toast.text }}</span>
-        <button @click="toast.text=''" class="opacity-60 hover:opacity-100">✕</button>
+        role="status" aria-live="polite"
+        class="fixed bottom-6 right-6 z-50 max-w-sm px-4 py-3 rounded-lg shadow-lg text-sm flex items-start gap-3 border"
+        :class="toast.type==='error' ? 'bg-rose-50 text-rose-800 border-rose-300'
+          : toast.type==='success' ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+          : 'bg-sky-50 text-sky-800 border-sky-300'">
+        <span class="shrink-0 mt-0.5">
+          {{ toast.type==='error' ? '✕' : toast.type==='success' ? '✓' : 'ℹ' }}
+        </span>
+        <span class="flex-1 break-words whitespace-pre-wrap">{{ toast.text }}</span>
+        <button @click="toast.text=''" class="shrink-0 opacity-50 hover:opacity-100" aria-label="关闭">✕</button>
       </div>
     </transition>
 
@@ -853,15 +862,33 @@
                   </div>
                   <div>
                     <label class="block text-xs text-slate-500 mb-1">上传阈值</label>
-                    <input v-model="p.threshold_total" placeholder="500GiB 或 536870912000"
-                      class="w-full px-2 py-1 border border-slate-300 rounded text-sm mono bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400">
-                    <p class="text-[11px] text-slate-400 mt-0.5">支持 500G / 500GiB / 字节数</p>
+                    <div class="flex gap-1">
+                      <input v-model.number="p.threshold_value" type="number" min="0" step="any"
+                        placeholder="500"
+                        class="flex-1 min-w-0 px-2 py-1 border border-slate-300 rounded text-sm mono bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                      <select v-model="p.threshold_unit"
+                        class="px-1 py-1 border border-slate-300 rounded text-sm bg-white">
+                        <option v-for="u in sizeUnits" :key="u.value" :value="u.value">{{ u.label }}</option>
+                      </select>
+                    </div>
+                    <p class="text-[11px] text-slate-400 mt-0.5">
+                      = {{ fmtSize(policyBytes(p.threshold_value, p.threshold_unit)) }}
+                    </p>
                   </div>
                   <div>
                     <label class="block text-xs text-slate-500 mb-1">限速至</label>
-                    <input v-model="p.limit_total" placeholder="1M 或 1048576"
-                      class="w-full px-2 py-1 border border-slate-300 rounded text-sm mono bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400">
-                    <p class="text-[11px] text-slate-400 mt-0.5">支持 1M / 512K / 0 表示不限</p>
+                    <div class="flex gap-1">
+                      <input v-model.number="p.limit_value" type="number" min="0" step="any"
+                        placeholder="1"
+                        class="flex-1 min-w-0 px-2 py-1 border border-slate-300 rounded text-sm mono bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                      <select v-model="p.limit_unit"
+                        class="px-1 py-1 border border-slate-300 rounded text-sm bg-white">
+                        <option v-for="u in speedUnits" :key="u.value" :value="u.value">{{ u.label }}</option>
+                      </select>
+                    </div>
+                    <p class="text-[11px] text-slate-400 mt-0.5">
+                      = {{ fmtSpeed(policyBytes(p.limit_value, p.limit_unit)) }}
+                    </p>
                   </div>
                 </div>
 
@@ -877,8 +904,15 @@
                   <div class="space-y-2">
                     <div>
                       <label class="block text-xs text-slate-500 mb-1">解除限速后速度（可选）</label>
-                      <input v-model="p.resume_limit_total" placeholder="留空 = 恢复原始限速"
-                        class="w-full px-2 py-1 border border-slate-300 rounded text-sm mono bg-white">
+                      <div class="flex gap-1">
+                        <input v-model.number="p.resume_value" type="number" min="0" step="any"
+                          placeholder="留空 = 恢复原始限速"
+                          class="flex-1 min-w-0 px-2 py-1 border border-slate-300 rounded text-sm mono bg-white">
+                        <select v-model="p.resume_unit"
+                          class="px-1 py-1 border border-slate-300 rounded text-sm bg-white">
+                          <option v-for="u in speedUnits" :key="u.value" :value="u.value">{{ u.label }}</option>
+                        </select>
+                      </div>
                     </div>
                     <label class="flex items-center gap-1 text-xs text-slate-600">
                       <input type="checkbox" v-model="p.resume_on_window_reset" class="rounded">
@@ -1591,9 +1625,11 @@ createApp({
     });
 
     // ---------- 工具函数 ----------
+    // 错误提示停留更久：报错信息通常较长，需要时间读完
     const showToast = (text, type = 'info') => {
       toast.text = text; toast.type = type;
-      setTimeout(() => { if (toast.text === text) toast.text = ''; }, 5000);
+      const ms = type === 'error' ? 12000 : 5000;
+      setTimeout(() => { if (toast.text === text) toast.text = ''; }, ms);
     };
     const fmtDur = (sec) => {
       if (!sec || sec < 0) return '0秒';
@@ -1929,19 +1965,68 @@ createApp({
     };
 
     // ---------- PT 限速策略（PT 策略页） ----------
+    // ---------- 单位选项 ----------
+    // 用户只填数字、单位走下拉，避免手写 "500GiB" / "1M" 出错。
+    // 内部统一按字节（阈值）和字节/秒（限速）传后端。
+    const sizeUnits = [
+      { value: 'GB', label: 'GB', mul: 1024 ** 3 },
+      { value: 'TB', label: 'TB', mul: 1024 ** 4 },
+      { value: 'MB', label: 'MB', mul: 1024 ** 2 },
+    ];
+    const speedUnits = [
+      { value: 'MB/s', label: 'MB/s', mul: 1024 ** 2 },
+      { value: 'KB/s', label: 'KB/s', mul: 1024 },
+      { value: 'B/s', label: 'B/s', mul: 1 },
+    ];
+
+    /** 数字 + 单位 → 字节数 */
+    const policyBytes = (value, unit) => {
+      const n = Number(value);
+      if (!isFinite(n) || n < 0) return 0;
+      const u = sizeUnits.concat(speedUnits).find((x) => x.value === unit);
+      return Math.round(n * (u ? u.mul : 1));
+    };
+
+    /** 字节数 → { value, unit }，自动挑一个合适的单位 */
+    const _splitBytes = (bytes, units) => {
+      const n = Number(bytes) || 0;
+      if (n <= 0) return { value: '', unit: units[0].value };
+      // 从大到小找第一个能用整数的单位
+      for (const u of units) {
+        if (n >= u.mul) {
+          const v = n / u.mul;
+          // 保留最多两位小数，且去掉多余的 0
+          return { value: Math.round(v * 100) / 100, unit: u.value };
+        }
+      }
+      const last = units[units.length - 1];
+      return { value: Math.round((n / last.mul) * 100) / 100, unit: last.value };
+    };
+
     const _normalizePolicies = (list) => {
-      return (list || []).map((p) => ({
-        name: p.name || '',
-        enabled: p.enabled !== false,
-        clients: Array.isArray(p.clients) ? [...p.clients] : [],
-        window: p.window || '24h',
-        align: p.align || 'day',
-        threshold_total: p.threshold_total || '',
-        limit_total: p.limit_total || '',
-        resume_limit_total: p.resume_limit_total || '',
-        resume_on_window_reset: p.resume_on_window_reset !== false,
-        cooldown: p.cooldown || '0s',
-      }));
+      return (list || []).map((p) => {
+        const th = _splitBytes(p.threshold_total, sizeUnits);
+        const lim = _splitBytes(p.limit_total, speedUnits);
+        const res = _splitBytes(p.resume_limit_total, speedUnits);
+        return {
+          name: p.name || '',
+          enabled: p.enabled !== false,
+          clients: Array.isArray(p.clients) ? [...p.clients] : [],
+          window: p.window || '24h',
+          align: p.align || 'day',
+          // 阈值
+          threshold_value: th.value,
+          threshold_unit: th.unit,
+          // 限速
+          limit_value: lim.value,
+          limit_unit: lim.unit,
+          // 解除限速后的速度
+          resume_value: res.value,
+          resume_unit: res.unit,
+          resume_on_window_reset: p.resume_on_window_reset !== false,
+          cooldown: p.cooldown || '0s',
+        };
+      });
     };
 
     const _payloadPolicies = (list) => {
@@ -1951,9 +2036,9 @@ createApp({
         clients: p.clients || [],
         window: p.window,
         align: p.align,
-        threshold_total: String(p.threshold_total || ''),
-        limit_total: String(p.limit_total || ''),
-        resume_limit_total: String(p.resume_limit_total || ''),
+        threshold_total: policyBytes(p.threshold_value, p.threshold_unit),
+        limit_total: policyBytes(p.limit_value, p.limit_unit),
+        resume_limit_total: policyBytes(p.resume_value, p.resume_unit),
         resume_on_window_reset: p.resume_on_window_reset,
         cooldown: p.cooldown || '0s',
       }));
@@ -1977,9 +2062,12 @@ createApp({
         clients: [],
         window: '24h',
         align: 'day',
-        threshold_total: '',
-        limit_total: '',
-        resume_limit_total: '',
+        threshold_value: '',
+        threshold_unit: 'GB',
+        limit_value: '',
+        limit_unit: 'MB/s',
+        resume_value: '',
+        resume_unit: 'MB/s',
         resume_on_window_reset: true,
         cooldown: '0s',
       });
@@ -1992,8 +2080,8 @@ createApp({
     const savePtPolicies = async () => {
       for (const p of ptPolicies.value) {
         if (!p.name.trim()) { showToast('策略名称不能为空', 'error'); return; }
-        if (!String(p.threshold_total).trim()) {
-          showToast(`策略「${p.name}」需要填写上传阈值`, 'error');
+        if (policyBytes(p.threshold_value, p.threshold_unit) <= 0) {
+          showToast(`策略「${p.name}」需要填写大于 0 的上传阈值`, 'error');
           return;
         }
       }
@@ -2500,6 +2588,7 @@ body = '''
       loadPtForm, savePtForm,
       // PT 限速策略（PT 策略页）
       ptPolicies, ptPolicyBusy, ptPolicyDirty, ptAddPolicy, ptRemovePolicy,
+      sizeUnits, speedUnits, policyBytes,
       loadPtPolicies, savePtPolicies,
       instantQuery, retryQuery, retryStatus, selectedRetry, allRetrySelected,
       ruleEditor, serviceCards, dashboardErrors, dashDetailOpen, thresholdHours, webhookUrl, testing,

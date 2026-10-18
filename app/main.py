@@ -53,9 +53,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 3) 初始化 PT 流量监控（读取已保存的下载器与策略）
     #    失败不阻断启动：CD2/115 功能应照常可用
     try:
+        from .config import DATA_DIR, DB_PATH
         from .services.bt_monitor import get_pt_monitor
 
-        await get_pt_monitor().reload()
+        monitor = get_pt_monitor()
+        await monitor.reload()
+
+        # 明确打印数据库位置与已加载的配置，方便排查「重启后配置丢失」。
+        # 如果这里显示 0 个下载器，但界面上明明保存过，基本可以确定
+        # 是数据卷没挂上（容器每次重建都是空库）。
+        logger.info("数据目录  : %s", DATA_DIR)
+        logger.info("数据库    : %s", DB_PATH)
+        logger.info(
+            "PT 配置   : 下载器 %d 个，策略 %d 条",
+            len(monitor.client_names),
+            len(monitor.engine.configs()),
+        )
+        if not monitor.client_names:
+            logger.warning(
+                "未加载到任何下载器配置。若此前保存过，请检查 "
+                "-v 挂载是否指向 /app/data（容器重建后数据库丢失会导致配置清空）"
+            )
         logger.info("PT 流量监控已就绪")
     except Exception as exc:  # noqa: BLE001
         logger.exception("PT 流量监控初始化失败")

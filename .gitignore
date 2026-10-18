@@ -24,3 +24,7 @@ Thumbs.db
 static/_preview.html
 static/_shot*.png
 backend_check_report.txt
+
+# 测试临时目录
+tests/.tmp_test/
+.tmp_test/
