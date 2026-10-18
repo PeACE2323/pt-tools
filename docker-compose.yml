@@ -1,0 +1,52 @@
+services:
+  pttools:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pttools:latest
+    container_name: pttools
+    restart: unless-stopped
+    ports:
+      # 单端口：CD2 守卫 / 115 监控 / BT 流量监控 都在 8899
+      - "8899:8899"
+    environment:
+      TZ: Asia/Shanghai
+      DATA_DIR: /app/data
+      # CD2 端口是 19798（核心服务，Web 与 gRPC 同端口）。
+      # 19799 是 HTTPS 管理端口且默认关闭，不要填。
+      #
+      # 三种常见部署，按实际情况选：
+      #   1) CD2 在宿主机/NAS 套件上          -> host.docker.internal:19798
+      #   2) CD2 是另一个容器且已映射 19798   -> host.docker.internal:19798（推荐）
+      #                                         或 宿主机局域网IP:19798
+      #   3) CD2 与本容器在同一 Docker 网络   -> <CD2容器名>:19798
+      CD2_DEFAULT_HOST: host.docker.internal:19798
+    volumes:
+      # 数据库、115 Cookie、日志、BT 配置与历史数据都在这里
+      - ./data:/app/data
+    # Linux 上让 host.docker.internal 指向宿主机网关
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8899/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 25s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 可选：若尚未部署 CloudDrive2，可一并启动
+  clouddrive2:
+    image: cloudnas/clouddrive2:latest
+    container_name: clouddrive2
+    restart: unless-stopped
+    ports:
+      - "19798:19798"   # 核心服务（Web UI + gRPC，同端口）
+    volumes:
+      - ./cd2-config:/Config
+    privileged: true
+    profiles: ["with-cd2"]   # docker compose --profile with-cd2 up -d

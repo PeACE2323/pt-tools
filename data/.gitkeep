@@ -1,0 +1,5 @@
+"""为容器镜像构建准备的空数据卷占位目录。
+
+运行时会在 docker-compose.yml 中把宿主机 ./data 挂载到 /app/data，
+数据库 guard.db、115-cookies.txt、logs/ 都写在这里。
+"""

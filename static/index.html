@@ -1,0 +1,1739 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CD2-115-Guard · 上传守卫与云下载清理</title>
+<script src="https://cdn.jsdelivr.net/npm/vue@3.4.21/dist/vue.global.prod.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tailwindcss@3.4.1/lib/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<style>
+  [v-cloak]{display:none}
+  body{background:#f1f5f9}
+  .fade-enter-active,.fade-leave-active{transition:opacity .15s}
+  .fade-enter-from,.fade-leave-to{opacity:0}
+  ::-webkit-scrollbar{width:8px;height:8px}
+  ::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:4px}
+  ::-webkit-scrollbar-thumb:hover{background:#94a3b8}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  /* 全局兜底：超长且不含空格的字符串（Cookie/Token/哈希/长路径）
+     默认不换行，会把卡片撑破、溢出到页面外。
+     这里让它们能在容器内断行。用 anywhere 而非 break-all，
+     可以优先在原本的断点处换行，观感更好。 */
+  .mono, code, .breakAnywhere{overflow-wrap:anywhere}
+  /* 表单控件不得超出父容器 */
+  input, textarea, select{max-width:100%}
+</style>
+</head>
+<body class="text-slate-800">
+<div id="app" v-cloak class="min-h-screen flex">
+
+  <!-- ===================== 侧边栏 ===================== -->
+  <aside class="w-56 shrink-0 bg-slate-900 text-slate-300 flex flex-col">
+    <div class="px-4 py-5 border-b border-slate-800">
+      <div class="flex items-center gap-2">
+        <span class="w-8 h-8 rounded-lg bg-emerald-500/20 flex items-center justify-center text-emerald-400 font-bold">PT</span>
+        <div>
+          <div class="text-white font-semibold text-sm leading-tight">PTtools</div>
+          <div class="text-[11px] text-slate-500">v{{ version }}</div>
+        </div>
+      </div>
+    </div>
+    <nav class="flex-1 py-2">
+      <button v-for="t in tabs" :key="t.key" @click="switchTab(t.key)"
+        :class="['w-full flex items-center gap-3 px-4 py-2.5 text-sm transition text-left',
+          tab===t.key ? 'bg-slate-800 text-white border-l-2 border-emerald-400'
+                      : 'border-l-2 border-transparent hover:bg-slate-800/60 hover:text-white']">
+        <span class="text-base">{{ t.icon }}</span>
+        <span class="flex-1">{{ t.label }}</span>
+        <span v-if="t.badge && t.badge()" class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300">
+          {{ t.badge() }}
+        </span>
+      </button>
+    </nav>
+    <div class="p-3 border-t border-slate-800 text-[11px] text-slate-500">
+      <div class="flex items-center gap-2 mb-1">
+        <span :class="['w-2 h-2 rounded-full', dash.cd2.connected ? 'bg-emerald-400':'bg-rose-500']"></span>
+        CD2 {{ dash.cd2.connected ? '已连接':'未连接' }}
+      </div>
+      <div class="flex items-center gap-2">
+        <span :class="['w-2 h-2 rounded-full', dash.p115.logged_in ? 'bg-emerald-400':'bg-rose-500']"></span>
+        115 {{ dash.p115.logged_in ? '已登录':'未登录' }}
+      </div>
+    </div>
+  </aside>
+
+  <!-- ===================== 主区域 ===================== -->
+  <main class="flex-1 min-w-0 flex flex-col">
+    <header class="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between">
+      <div>
+        <h1 class="font-semibold text-lg">{{ currentTab.label }}</h1>
+        <p class="text-xs text-slate-500">{{ currentTab.desc }}</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="text-xs text-slate-400">刷新 {{ lastRefreshText }}</span>
+        <button @click="refreshAll()" :disabled="loading"
+          class="px-3 py-1.5 text-sm rounded-md bg-slate-100 hover:bg-slate-200 disabled:opacity-50 transition">
+          {{ loading ? '刷新中…' : '刷新' }}
+        </button>
+      </div>
+    </header>
+
+    <!-- 全局提示 -->
+    <transition name="fade">
+      <div v-if="toast.text"
+        :class="['mx-6 mt-3 px-4 py-2 rounded-md text-sm flex items-center justify-between',
+          toast.type==='error' ? 'bg-rose-50 text-rose-700 border border-rose-200'
+          : toast.type==='success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+          : 'bg-sky-50 text-sky-700 border border-sky-200']">
+        <span>{{ toast.text }}</span>
+        <button @click="toast.text=''" class="opacity-60 hover:opacity-100">✕</button>
+      </div>
+    </transition>
+
+    <div class="p-6 overflow-auto flex-1">
+
+      <!-- ============ 仪表盘 ============ -->
+      <div v-if="tab==='dashboard'" class="space-y-5">
+        <div class="grid grid-cols-2 lg:grid-cols-5 gap-4">
+          <div v-for="c in dashboardCards" :key="c.label"
+               class="bg-white rounded-lg border border-slate-200 p-4">
+            <div class="text-xs text-slate-500 mb-1">{{ c.label }}</div>
+            <div :class="['text-2xl font-semibold', c.color || 'text-slate-800']">{{ c.value }}</div>
+            <div class="text-[11px] text-slate-400 mt-1">{{ c.hint }}</div>
+          </div>
+        </div>
+
+        <div class="grid lg:grid-cols-2 gap-5">
+          <!-- CD2 状态 -->
+          <div class="bg-white rounded-lg border border-slate-200 p-5">
+            <h3 class="font-medium mb-3 flex items-center gap-2">
+              <span :class="['w-2 h-2 rounded-full', dash.cd2.connected?'bg-emerald-500':'bg-rose-500']"></span>
+              CloudDrive2 连接状态
+            </h3>
+            <dl class="text-sm space-y-2">
+              <div class="flex justify-between"><dt class="text-slate-500">gRPC 地址</dt>
+                <dd class="mono">{{ dash.cd2.host || '未配置' }}</dd></div>
+              <div class="flex justify-between"><dt class="text-slate-500">gRPC 连通</dt>
+                <dd :class="dash.cd2.connected?'text-emerald-600':'text-rose-600'">{{ dash.cd2.connected?'正常':'失败' }}</dd></div>
+              <div class="flex justify-between"><dt class="text-slate-500">Token 鉴权</dt>
+                <dd :class="dash.cd2.authenticated?'text-emerald-600':'text-amber-600'">{{ dash.cd2.authenticated?'有效':'未验证/无效' }}</dd></div>
+              <div class="flex justify-between"><dt class="text-slate-500">CD2 用户</dt>
+                <dd>{{ dash.cd2.user_name || '—' }}</dd></div>
+              <div class="flex justify-between"><dt class="text-slate-500">上传队列</dt>
+                <dd>{{ dash.cd2.upload_count }} 个</dd></div>
+              <div class="flex justify-between"><dt class="text-slate-500">最近轮询</dt>
+                <dd class="mono text-xs">{{ fmtAgo(dash.cd2.last_poll_at) }}</dd></div>
+            </dl>
+            <div v-if="dash.cd2.last_poll_error" class="mt-3 text-xs text-rose-600 bg-rose-50 rounded p-2 break-all">
+              {{ dash.cd2.last_poll_error }}
+            </div>
+            <div class="mt-3 flex gap-2">
+              <button @click="switchTab('settings')" class="text-xs text-sky-600 hover:underline">去设置</button>
+              <button @click="switchTab('logs')" class="text-xs text-sky-600 hover:underline">查看日志</button>
+            </div>
+          </div>
+
+          <!-- 115 状态 -->
+          <div class="bg-white rounded-lg border border-slate-200 p-5">
+            <h3 class="font-medium mb-3 flex items-center gap-2">
+              <span :class="['w-2 h-2 rounded-full', dash.p115.logged_in?'bg-emerald-500':'bg-rose-500']"></span>
+              115 账号状态
+            </h3>
+            <dl class="text-sm space-y-2">
+              <div class="flex justify-between"><dt class="text-slate-500">Cookie</dt>
+                <dd :class="dash.p115.configured?'text-emerald-600':'text-rose-600'">{{ dash.p115.configured?'已配置':'未配置' }}</dd></div>
+              <div class="flex justify-between"><dt class="text-slate-500">登录状态</dt>
+                <dd :class="dash.p115.logged_in?'text-emerald-600':'text-amber-600'">{{ dash.p115.logged_in?'有效':'无效/未验证' }}</dd></div>
+              <div class="flex justify-between"><dt class="text-slate-500">UID</dt>
+                <dd class="mono">{{ dash.p115.user_id || '—' }}</dd></div>
+              <div class="flex justify-between"><dt class="text-slate-500">云下载任务</dt>
+                <dd>{{ dash.p115.task_count }} 个</dd></div>
+              <div class="flex justify-between"><dt class="text-slate-500">最近轮询</dt>
+                <dd class="mono text-xs">{{ fmtAgo(dash.p115.last_poll_at) }}</dd></div>
+            </dl>
+            <div v-if="dash.p115.last_poll_error" class="mt-3 text-xs text-rose-600 bg-rose-50 rounded p-2 break-all">
+              {{ dash.p115.last_poll_error }}
+            </div>
+            <div class="mt-3 flex gap-2">
+              <button @click="switchTab('settings')" class="text-xs text-sky-600 hover:underline">去设置</button>
+              <button @click="switchTab('logs')" class="text-xs text-sky-600 hover:underline">查看日志</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 调度任务 -->
+        <div class="bg-white rounded-lg border border-slate-200 p-5">
+          <h3 class="font-medium mb-3">后台调度任务</h3>
+          <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div v-for="j in dash.scheduler.jobs" :key="j.id"
+                 class="border border-slate-200 rounded p-3">
+              <div class="text-sm font-medium">{{ j.name }}</div>
+              <div class="text-[11px] text-slate-500 mono">{{ j.id }}</div>
+              <div class="text-[11px] text-emerald-600 mt-1">下次 {{ fmtAgo(j.next_run_at) }}</div>
+            </div>
+            <div v-if="!dash.scheduler.jobs.length" class="text-sm text-slate-400">调度器未运行</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ 规则管理 ============ -->
+      <div v-if="tab==='rules'" class="space-y-4">
+        <div class="bg-sky-50 border border-sky-200 rounded-lg p-3 text-sm text-sky-800">
+          只监控<strong>命中规则</strong>的上传任务，其余任务完全不记录。
+          关键字为子串匹配（<code class="mono">PT</code> 也会命中 <code class="mono">apt</code>），
+          需精确匹配目录请勾选「正则」并填 <code class="mono">/PT/</code>。
+        </div>
+
+        <div class="flex justify-end">
+          <button @click="openRuleEditor()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm rounded-md">
+            + 新建规则
+          </button>
+        </div>
+
+        <div class="bg-white rounded-lg border border-slate-200 overflow-hidden">
+          <table class="w-full text-sm">
+            <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+              <tr>
+                <th class="px-4 py-2.5 text-left">优先级</th>
+                <th class="px-4 py-2.5 text-left">名称</th>
+                <th class="px-4 py-2.5 text-left">关键字</th>
+                <th class="px-4 py-2.5 text-left">超时</th>
+                <th class="px-4 py-2.5 text-left">重试</th>
+                <th class="px-4 py-2.5 text-left">状态</th>
+                <th class="px-4 py-2.5 text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in rules" :key="r.id" class="border-t border-slate-100 hover:bg-slate-50/60">
+                <td class="px-4 py-2.5 mono text-slate-500">{{ r.priority }}</td>
+                <td class="px-4 py-2.5 font-medium">{{ r.name }}</td>
+                <td class="px-4 py-2.5">
+                  <div class="flex flex-wrap gap-1 max-w-xs">
+                    <span v-for="k in r.source_keywords.split('\n').filter(Boolean)" :key="k"
+                      class="mono text-[11px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-700">{{ k }}</span>
+                    <span v-if="r.is_regex" class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700">正则</span>
+                  </div>
+                </td>
+                <td class="px-4 py-2.5">{{ fmtDur(r.timeout_threshold) }}</td>
+                <td class="px-4 py-2.5 text-xs">
+                  {{ r.max_retry }} 次 / 间隔 {{ fmtDur(r.retry_interval) }}
+                </td>
+                <td class="px-4 py-2.5">
+                  <button @click="toggleRule(r)"
+                    :class="['text-xs px-2 py-0.5 rounded-full',
+                      r.enabled ? 'bg-emerald-100 text-emerald-700':'bg-slate-200 text-slate-500']">
+                    {{ r.enabled ? '启用':'禁用' }}
+                  </button>
+                </td>
+                <td class="px-4 py-2.5 text-right whitespace-nowrap">
+                  <button @click="openRuleEditor(r)" class="text-sky-600 hover:underline text-xs mr-3">编辑</button>
+                  <button @click="deleteRule(r)" class="text-rose-600 hover:underline text-xs">删除</button>
+                </td>
+              </tr>
+              <tr v-if="!rules.length">
+                <td colspan="7" class="px-4 py-10 text-center text-slate-400 text-sm">
+                  还没有规则。不建规则时系统不会监控任何上传任务。
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ============ 任务监控 ============ -->
+      <div v-if="tab==='tasks'" class="space-y-4">
+        <div class="flex gap-1 bg-slate-100 p-1 rounded-lg w-fit text-sm">
+          <button v-for="s in taskSubTabs" :key="s.key" @click="taskTab=s.key"
+            :class="['px-4 py-1.5 rounded-md transition',
+              taskTab===s.key?'bg-white shadow-sm font-medium':'text-slate-600 hover:text-slate-900']">
+            {{ s.label }}
+            <span v-if="s.count" class="text-[11px] text-slate-400 ml-1">{{ s.count }}</span>
+          </button>
+        </div>
+
+        <!-- 实时任务 -->
+        <div v-if="taskTab==='live'" class="bg-white rounded-lg border border-slate-200 overflow-hidden">
+          <table class="w-full text-sm">
+            <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+              <tr>
+                <th class="px-4 py-2.5 text-left">文件名</th>
+                <th class="px-4 py-2.5 text-left">源路径</th>
+                <th class="px-4 py-2.5 text-left">规则</th>
+                <th class="px-4 py-2.5 text-left">状态</th>
+                <th class="px-4 py-2.5 text-right">进度</th>
+                <th class="px-4 py-2.5 text-right">传输 / 排队</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="t in liveTasks" :key="t.id" class="border-t border-slate-100 hover:bg-slate-50/60">
+                <td class="px-4 py-2.5 font-medium max-w-[16rem] truncate" :title="t.file_name">{{ t.file_name }}</td>
+                <td class="px-4 py-2.5 text-xs text-slate-500 max-w-[18rem] truncate mono" :title="t.source_path">
+                  {{ t.source_path || '—' }}
+                </td>
+                <td class="px-4 py-2.5">
+                  <span v-if="t.matched_rule_name" class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700">
+                    {{ t.matched_rule_name }}
+                  </span>
+                  <span v-else class="text-slate-300">—</span>
+                </td>
+                <td class="px-4 py-2.5">
+                  <span :class="['text-[11px] px-1.5 py-0.5 rounded', statusClass(t.status_enum)]">{{ t.status_text }}</span>
+                  <span v-if="t.state==='queued'" class="text-[10px] text-slate-400 ml-1" title="CD2 有并发上限，排队属正常，不计入超时">排队中</span>
+                </td>
+                <td class="px-4 py-2.5 text-right">
+                  <div class="flex items-center justify-end gap-2">
+                    <div class="w-16 h-1.5 bg-slate-200 rounded overflow-hidden">
+                      <div class="h-full bg-emerald-500" :style="{width: t.progress+'%'}"></div>
+                    </div>
+                    <span class="text-xs text-slate-500 w-10 text-right">{{ t.progress.toFixed(0) }}%</span>
+                  </div>
+                </td>
+                <td class="px-4 py-2.5 text-right mono text-xs whitespace-nowrap">
+                  <span class="text-slate-700">{{ fmtDur(t.transfer_sec) }}</span>
+                  <span v-if="t.queued_sec > 0" class="text-slate-400" :title="'其中排队 ' + fmtDur(t.queued_sec) + '，不计入超时'">
+                    / {{ fmtDur(t.queued_sec) }}
+                  </span>
+                </td>
+              </tr>
+              <tr v-if="!liveTasks.length">
+                <td colspan="6" class="px-4 py-10 text-center text-slate-400 text-sm">
+                  当前没有在监控范围内的上传任务
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 秒传记录 -->
+        <div v-if="taskTab==='instant'" class="space-y-3">
+          <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-xs text-emerald-900 leading-relaxed">
+            <strong>秒传判定依据</strong>：CD2 上传前会先算文件哈希发给 115，
+            若 115 上已存在相同文件（别人的网盘里有也算），服务器就<strong>不接收文件数据</strong>，
+            直接建一条指向已有文件的记录。所以秒传的特征是
+            <strong>「实际传输 ≈ 0 字节」</strong>，而不是「耗时短」。
+            下表的「实际传输」列就是判定证据：显示 <code class="mono">0（未传数据）</code> 即为真秒传。
+          </div>
+          <div class="flex gap-2 items-center">
+            <input v-model="instantQuery" @keyup.enter="loadInstant(1)" placeholder="搜索文件名/路径…"
+              class="px-3 py-1.5 border border-slate-300 rounded-md text-sm w-64 focus:outline-none focus:ring-2 focus:ring-emerald-400">
+            <button @click="loadInstant(1)" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-sm">搜索</button>
+            <div class="flex-1"></div>
+            <button @click="clearInstant()" class="px-3 py-1.5 text-rose-600 hover:bg-rose-50 rounded-md text-sm">清空记录</button>
+          </div>
+          <div class="bg-white rounded-lg border border-slate-200 overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+                <tr>
+                  <th class="px-4 py-2.5 text-left">文件名</th>
+                  <th class="px-4 py-2.5 text-left">源路径</th>
+                  <th class="px-4 py-2.5 text-left">规则</th>
+                  <th class="px-4 py-2.5 text-right">大小</th>
+                  <th class="px-4 py-2.5 text-right" title="完成时实际传输的字节数。接近 0 说明服务器已有相同文件，未接收数据（真秒传）">实际传输</th>
+                  <th class="px-4 py-2.5 text-right">耗时</th>
+                  <th class="px-4 py-2.5 text-right">完成时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in instantPage.items" :key="r.id" class="border-t border-slate-100">
+                  <td class="px-4 py-2.5 max-w-[16rem] truncate" :title="r.file_name">{{ r.file_name }}</td>
+                  <td class="px-4 py-2.5 text-xs text-slate-500 max-w-[16rem] truncate mono" :title="r.source_path">{{ r.source_path }}</td>
+                  <td class="px-4 py-2.5 text-xs">{{ r.rule_name || '—' }}</td>
+                  <td class="px-4 py-2.5 text-right text-xs">{{ fmtSize(r.size) }}</td>
+                  <td class="px-4 py-2.5 text-right mono text-xs">
+                    <span :class="r.transferred_bytes === 0 ? 'text-emerald-600 font-medium' : 'text-slate-500'">
+                      {{ r.transferred_bytes === 0 ? '0（未传数据）' : fmtSize(r.transferred_bytes) }}
+                    </span>
+                  </td>
+                  <td class="px-4 py-2.5 text-right mono text-xs text-slate-500">{{ fmtDur(r.duration_sec) }}</td>
+                  <td class="px-4 py-2.5 text-right text-xs text-slate-500">{{ fmtTime(r.finished_at) }}</td>
+                </tr>
+                <tr v-if="!instantPage.items.length">
+                  <td colspan="7" class="px-4 py-10 text-center text-slate-400 text-sm">
+                    暂无秒传记录
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="flex items-center justify-between text-sm text-slate-500">
+            <span>共 {{ instantPage.total }} 条</span>
+            <div class="flex gap-2">
+              <button @click="loadInstant(instantPage.page-1)" :disabled="instantPage.page<=1"
+                class="px-3 py-1 bg-white border rounded disabled:opacity-40">上一页</button>
+              <button @click="loadInstant(instantPage.page+1)" :disabled="instantPage.page*instantPage.page_size>=instantPage.total"
+                class="px-3 py-1 bg-white border rounded disabled:opacity-40">下一页</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 重试队列 -->
+        <div v-if="taskTab==='retry'" class="space-y-3">
+          <!-- 状态速览：点击即可筛选，避免「有失败数字却找不到记录」 -->
+          <div class="flex gap-2 flex-wrap">
+            <button v-for="s in retryStatChips" :key="s.key" type="button"
+              @click="retryStatus = (retryStatus === s.key ? '' : s.key); loadNonInstant(1)"
+              :class="['px-2.5 py-1 rounded-md text-xs border transition',
+                retryStatus === s.key
+                  ? 'bg-slate-800 text-white border-slate-800'
+                  : 'bg-white border-slate-200 hover:border-slate-400']">
+              {{ s.label }}
+              <span :class="['ml-1 font-medium', retryStatus === s.key ? 'text-white' : s.cls]">{{ s.count }}</span>
+            </button>
+            <button v-if="retryStatus" type="button" @click="retryStatus=''; loadNonInstant(1)"
+              class="px-2.5 py-1 rounded-md text-xs text-slate-500 hover:bg-slate-100">
+              清除筛选
+            </button>
+          </div>
+          <div class="flex gap-2 items-center flex-wrap">
+            <input v-model="retryQuery" @keyup.enter="loadNonInstant(1)" placeholder="搜索文件名/路径…"
+              class="px-3 py-1.5 border border-slate-300 rounded-md text-sm w-56 focus:outline-none focus:ring-2 focus:ring-emerald-400">
+            <select v-model="retryStatus" @change="loadNonInstant(1)"
+              class="px-2 py-1.5 border border-slate-300 rounded-md text-sm">
+              <option value="">全部状态</option>
+              <option value="waiting">等待重试</option>
+              <option value="retrying">重试中</option>
+              <option value="success">重试成功</option>
+              <option value="failed">最终失败</option>
+              <option value="cancelled">已取消</option>
+            </select>
+            <button @click="loadNonInstant(1)" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-sm">搜索</button>
+            <div class="flex-1"></div>
+            <button @click="batchRetry()" :disabled="!selectedRetry.length"
+              class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white rounded-md text-sm">
+              批量重试 ({{ selectedRetry.length }})
+            </button>
+            <button @click="batchCancelRetry()" :disabled="!selectedRetry.length"
+              class="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white rounded-md text-sm">
+              取消重试
+            </button>
+            <button @click="batchDeleteRetry()" :disabled="!selectedRetry.length"
+              class="px-3 py-1.5 text-rose-600 hover:bg-rose-50 disabled:opacity-40 rounded-md text-sm">
+              删除
+            </button>
+          </div>
+
+          <div class="bg-white rounded-lg border border-slate-200 overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+                <tr>
+                  <th class="px-3 py-2.5 w-8">
+                    <input type="checkbox" @change="toggleAllRetry($event)" :checked="allRetrySelected">
+                  </th>
+                  <th class="px-3 py-2.5 text-left">文件名</th>
+                  <th class="px-3 py-2.5 text-left">规则</th>
+                  <th class="px-3 py-2.5 text-center">重试</th>
+                  <th class="px-3 py-2.5 text-left">状态</th>
+                  <th class="px-3 py-2.5 text-left">下次重试</th>
+                  <th class="px-3 py-2.5 text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in nonInstantPage.items" :key="r.id" class="border-t border-slate-100 hover:bg-slate-50/60">
+                  <td class="px-3 py-2.5">
+                    <input type="checkbox" :value="r.id" v-model="selectedRetry">
+                  </td>
+                  <td class="px-3 py-2.5">
+                    <div class="font-medium max-w-[16rem] truncate" :title="r.file_name">{{ r.file_name }}</div>
+                    <div class="text-[11px] text-slate-400 mono truncate max-w-[16rem]" :title="r.source_path">{{ r.source_path }}</div>
+                  </td>
+                  <td class="px-3 py-2.5 text-xs">{{ r.rule_name || '—' }}</td>
+                  <td class="px-3 py-2.5 text-center mono text-xs">{{ r.retry_count }}/{{ r.max_retry }}</td>
+                  <td class="px-3 py-2.5">
+                    <span :class="['text-[11px] px-1.5 py-0.5 rounded', retryStatusClass(r.status)]">
+                      {{ retryStatusLabel(r.status) }}
+                    </span>
+                    <div v-if="r.error_message" class="text-[10px] text-rose-500 mt-0.5 max-w-[12rem] truncate" :title="r.error_message">
+                      {{ r.error_message }}
+                    </div>
+                  </td>
+                  <td class="px-3 py-2.5 text-xs mono text-slate-500">
+                    <span v-if="r.next_retry_at">{{ fmtAgo(r.next_retry_at) }}</span>
+                    <span v-else>—</span>
+                  </td>
+                  <td class="px-3 py-2.5 text-right whitespace-nowrap">
+                    <button @click="singleRetry(r)" class="text-emerald-600 hover:underline text-xs mr-2">立即重试</button>
+                    <button @click="deleteRetryOne(r)" class="text-rose-600 hover:underline text-xs">删除</button>
+                  </td>
+                </tr>
+                <tr v-if="!nonInstantPage.items.length">
+                  <td colspan="7" class="px-4 py-10 text-center text-slate-400 text-sm">暂无记录</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="flex items-center justify-between text-sm text-slate-500">
+            <span>共 {{ nonInstantPage.total }} 条</span>
+            <div class="flex gap-2">
+              <button @click="loadNonInstant(nonInstantPage.page-1)" :disabled="nonInstantPage.page<=1"
+                class="px-3 py-1 bg-white border rounded disabled:opacity-40">上一页</button>
+              <button @click="loadNonInstant(nonInstantPage.page+1)" :disabled="nonInstantPage.page*nonInstantPage.page_size>=nonInstantPage.total"
+                class="px-3 py-1 bg-white border rounded disabled:opacity-40">下一页</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ 115 云下载 ============ -->
+      <div v-if="tab==='p115'" class="space-y-4">
+        <div class="grid sm:grid-cols-3 gap-4">
+          <div class="bg-white rounded-lg border border-slate-200 p-4">
+            <div class="text-xs text-slate-500">超时阈值</div>
+            <div class="text-xl font-semibold mt-1">{{ fmtDur(p115Config.timeout_threshold) }}</div>
+            <button @click="tab='settings'" class="text-[11px] text-sky-600 hover:underline mt-1">去修改</button>
+          </div>
+          <div class="bg-white rounded-lg border border-slate-200 p-4">
+            <div class="text-xs text-slate-500">轮询间隔</div>
+            <div class="text-xl font-semibold mt-1">{{ fmtDur(p115Config.poll_interval) }}</div>
+          </div>
+          <div class="bg-white rounded-lg border border-slate-200 p-4">
+            <div class="text-xs text-slate-500">自动取消</div>
+            <div :class="['text-xl font-semibold mt-1', p115Config.auto_cancel?'text-emerald-600':'text-slate-400']">
+              {{ p115Config.auto_cancel ? '已开启':'已关闭' }}
+            </div>
+          </div>
+        </div>
+
+        <div class="flex gap-1 bg-slate-100 p-1 rounded-lg w-fit text-sm">
+          <button v-for="s in p115SubTabs" :key="s.key" @click="p115Tab=s.key"
+            :class="['px-4 py-1.5 rounded-md transition',
+              p115Tab===s.key?'bg-white shadow-sm font-medium':'text-slate-600 hover:text-slate-900']">
+            {{ s.label }}
+          </button>
+        </div>
+
+        <div v-if="p115Tab==='list'" class="space-y-3">
+          <div class="flex justify-end">
+            <button @click="refreshOffline()" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-sm">
+              立即刷新列表
+            </button>
+          </div>
+          <div class="bg-white rounded-lg border border-slate-200 overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+                <tr>
+                  <th class="px-4 py-2.5 text-left">任务名</th>
+                  <th class="px-4 py-2.5 text-left">状态</th>
+                  <th class="px-4 py-2.5 text-right">进度</th>
+                  <th class="px-4 py-2.5 text-right">驻留时长</th>
+                  <th class="px-4 py-2.5 text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="t in offlineTasks" :key="t.id"
+                    :class="['border-t border-slate-100', t.over_threshold?'bg-rose-50/50':'']">
+                  <td class="px-4 py-2.5">
+                    <div class="font-medium max-w-[22rem] truncate" :title="t.name">{{ t.name || '(无名称)' }}</div>
+                    <div class="text-[10px] text-slate-400 mono truncate">{{ t.info_hash }}</div>
+                  </td>
+                  <td class="px-4 py-2.5">
+                    <span :class="['text-[11px] px-1.5 py-0.5 rounded', p115StatusClass(t.normalized_status)]">
+                      {{ p115StatusLabel(t.normalized_status) }}
+                    </span>
+                    <span v-if="t.over_threshold" class="text-[10px] text-rose-600 ml-1">已超时</span>
+                  </td>
+                  <td class="px-4 py-2.5 text-right mono text-xs">{{ t.percent_done.toFixed(1) }}%</td>
+                  <td class="px-4 py-2.5 text-right mono text-xs">{{ fmtDur(t.age_sec) }}</td>
+                  <td class="px-4 py-2.5 text-right">
+                    <button @click="cancelOffline(t)" class="text-rose-600 hover:underline text-xs">取消任务</button>
+                  </td>
+                </tr>
+                <tr v-if="!offlineTasks.length">
+                  <td colspan="5" class="px-4 py-10 text-center text-slate-400 text-sm">暂无云下载任务</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div v-if="p115Tab==='logs'" class="space-y-3">
+          <div class="flex justify-end">
+            <button @click="clearCancelLogs()" class="px-3 py-1.5 text-rose-600 hover:bg-rose-50 rounded-md text-sm">
+              清空日志
+            </button>
+          </div>
+          <div class="bg-white rounded-lg border border-slate-200 overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+                <tr>
+                  <th class="px-4 py-2.5 text-left">任务名</th>
+                  <th class="px-4 py-2.5 text-left">info_hash</th>
+                  <th class="px-4 py-2.5 text-right">取消时进度</th>
+                  <th class="px-4 py-2.5 text-right">存在时长</th>
+                  <th class="px-4 py-2.5 text-left">触发</th>
+                  <th class="px-4 py-2.5 text-right">取消时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="l in cancelLogsPage.items" :key="l.id" class="border-t border-slate-100">
+                  <td class="px-4 py-2.5 max-w-[18rem] truncate" :title="l.name">{{ l.name || '—' }}</td>
+                  <td class="px-4 py-2.5 text-[10px] mono text-slate-400 max-w-[10rem] truncate">{{ l.info_hash }}</td>
+                  <td class="px-4 py-2.5 text-right mono text-xs">{{ l.percent_done.toFixed(1) }}%</td>
+                  <td class="px-4 py-2.5 text-right mono text-xs">{{ fmtDur(l.age_sec) }}</td>
+                  <td class="px-4 py-2.5">
+                    <span :class="['text-[11px] px-1.5 py-0.5 rounded',
+                      l.trigger==='auto'?'bg-amber-100 text-amber-700':'bg-sky-100 text-sky-700']">
+                      {{ l.trigger==='auto'?'自动':'手动' }}
+                    </span>
+                    <span v-if="!l.success" class="text-[10px] text-rose-600 ml-1">失败</span>
+                  </td>
+                  <td class="px-4 py-2.5 text-right text-xs text-slate-500">{{ fmtTime(l.cancel_at) }}</td>
+                </tr>
+                <tr v-if="!cancelLogsPage.items.length">
+                  <td colspan="6" class="px-4 py-10 text-center text-slate-400 text-sm">暂无取消日志</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="flex items-center justify-between text-sm text-slate-500">
+            <span>共 {{ cancelLogsPage.total }} 条</span>
+            <div class="flex gap-2">
+              <button @click="loadCancelLogs(cancelLogsPage.page-1)" :disabled="cancelLogsPage.page<=1"
+                class="px-3 py-1 bg-white border rounded disabled:opacity-40">上一页</button>
+              <button @click="loadCancelLogs(cancelLogsPage.page+1)" :disabled="cancelLogsPage.page*cancelLogsPage.page_size>=cancelLogsPage.total"
+                class="px-3 py-1 bg-white border rounded disabled:opacity-40">下一页</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ BT 流量监控 ============ -->
+      <div v-if="tab==='bt'" class="space-y-3">
+        <!-- 子服务状态条 -->
+        <div class="flex flex-wrap items-center gap-3 text-sm">
+          <span :class="['inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs',
+            btg.healthy ? 'bg-emerald-100 text-emerald-700'
+            : btg.running ? 'bg-amber-100 text-amber-700'
+            : 'bg-rose-100 text-rose-700']">
+            <span :class="['w-2 h-2 rounded-full',
+              btg.healthy ? 'bg-emerald-500'
+              : btg.running ? 'bg-amber-500' : 'bg-rose-500']"></span>
+            {{ btg.healthy ? '运行中' : btg.running ? '启动中/异常' : '未运行' }}
+          </span>
+          <span v-if="btg.pid" class="text-xs text-slate-400 mono">PID {{ btg.pid }}</span>
+          <span v-if="btg.restart_count" class="text-xs text-amber-600">已重启 {{ btg.restart_count }} 次</span>
+          <div class="flex-1"></div>
+          <button @click="reloadBtgFrame()" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs">
+            重新载入
+          </button>
+          <button @click="restartBtg()" :disabled="btgBusy"
+            class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs disabled:opacity-50">
+            {{ btgBusy ? '重启中…' : '重启子服务' }}
+          </button>
+        </div>
+
+        <!-- 未安装 -->
+        <div v-if="!btg.available"
+          class="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
+          <div class="font-medium mb-1">BT 流量监控未安装</div>
+          <p class="text-xs leading-relaxed">
+            镜像构建时未包含 Go 子服务二进制（<code class="mono">bt-traffic-guard</code>）。
+            这通常发生在用源码直接运行、或用 <code class="mono">--target runtime</code>
+            跳过 Go 编译阶段时。CD2 与 115 功能不受影响。
+          </p>
+        </div>
+
+        <!-- 未运行 -->
+        <div v-else-if="!btg.running"
+          class="bg-rose-50 border border-rose-200 rounded-lg p-4 text-sm text-rose-800">
+          <div class="font-medium mb-1">BT 流量子服务未运行</div>
+          <p class="text-xs leading-relaxed break-all">{{ btg.last_error || '未知原因' }}</p>
+          <button @click="restartBtg()" class="mt-2 px-3 py-1.5 bg-white border border-rose-300 rounded text-xs">
+            尝试启动
+          </button>
+        </div>
+
+        <!-- 正常：内嵌 Go 侧面板 -->
+        <div v-else class="bg-white rounded-lg border border-slate-200 overflow-hidden">
+          <iframe :key="btgFrameKey" :src="btgFrameUrl"
+            class="w-full border-0" style="height: calc(100vh - 220px); min-height: 640px"
+            title="BT 流量监控"></iframe>
+        </div>
+      </div>
+
+      <!-- ============ 系统设置 ============ -->
+      <div v-if="tab==='settings'" class="space-y-5">
+        <!-- CD2 -->
+        <div class="bg-white rounded-lg border border-slate-200 p-5">
+          <h3 class="font-medium mb-4">CloudDrive2</h3>
+          <div class="grid gap-x-4 gap-y-4 sm:grid-cols-2 xl:grid-cols-3">
+            <div class="sm:col-span-2 xl:col-span-2">
+              <label class="block text-xs text-slate-500 mb-1">CD2 地址（host:port）</label>
+              <input v-model="form.cd2_host" placeholder="192.168.1.10:19798"
+                class="w-full px-3 py-2 border border-slate-300 rounded-md text-sm mono focus:outline-none focus:ring-2 focus:ring-emerald-400">
+              <p class="text-[11px] text-slate-400 mt-1">
+                端口填 <b>19798</b>（CD2 核心服务，Web 与 gRPC 同端口）。
+              </p>
+            </div>
+            <div class="sm:col-span-2 xl:col-span-1">
+              <label class="block text-xs text-slate-500 mb-1">上传任务轮询间隔（秒）</label>
+              <input v-model.number="form.cd2_poll_interval" type="number" min="2"
+                class="w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400">
+              <p class="text-[11px] text-slate-400 mt-1">越小越及时，建议 3～5 秒。</p>
+            </div>
+            <div class="sm:col-span-2 xl:col-span-3">
+              <label class="block text-xs text-slate-500 mb-1">API Token</label>
+              <input v-model="form.cd2_token" :placeholder="settings.cd2_token_set ? '已设置，留空不修改' : '粘贴 CD2 API Token'"
+                class="w-full px-3 py-2 border border-slate-300 rounded-md text-sm mono focus:outline-none focus:ring-2 focus:ring-emerald-400">
+              <p v-if="settings.cd2_token_set" class="text-[11px] text-slate-400 mt-1 mono">
+                当前：{{ settings.cd2_token_masked }}
+              </p>
+            </div>
+            <div>
+              <label class="block text-xs text-slate-500 mb-1">CD2 账号（可选，用于换取 Token）</label>
+              <input v-model="form.cd2_username"
+                class="w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400">
+            </div>
+            <div>
+              <label class="block text-xs text-slate-500 mb-1">CD2 密码</label>
+              <input v-model="form.cd2_password" type="password" :placeholder="settings.cd2_password_set?'已设置，留空不修改':''"
+                class="w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400">
+            </div>
+          </div>
+          <div class="flex flex-wrap gap-2 mt-4">
+            <button @click="testCd2()" :disabled="testing.cd2"
+              class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-sm disabled:opacity-50">
+              {{ testing.cd2?'测试中…':'连接测试' }}
+            </button>
+            <button @click="fetchToken()" :disabled="testing.token"
+              class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-sm disabled:opacity-50">
+              {{ testing.token?'获取中…':'用账号密码获取 Token' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- 115 -->
+        <div class="bg-white rounded-lg border border-slate-200 p-5">
+          <h3 class="font-medium mb-4 flex items-center gap-2">
+            115 网盘
+            <span v-if="settings.p115_cookie_set"
+              class="text-[11px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-normal">
+              ✓ Cookie 已配置
+            </span>
+            <span v-else
+              class="text-[11px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 font-normal">
+              未配置
+            </span>
+          </h3>
+          <div class="space-y-4">
+            <div>
+              <label class="block text-xs text-slate-500 mb-1">
+                Cookie
+                <span v-if="settings.p115_cookie_set" class="text-slate-400">（留空表示不修改已保存的 Cookie）</span>
+              </label>
+              <div class="relative">
+                <textarea v-model="form.p115_cookie" rows="3"
+                  :placeholder="settings.p115_cookie_set ? '如需更换，在此粘贴新 Cookie；留空则保持不变' : '在此粘贴 115 Cookie：UID=...; CID=...; SEID=...; KID=...'"
+                  class="w-full px-3 py-2 pr-10 border border-slate-300 rounded-md text-xs mono resize-y break-all focus:outline-none focus:ring-2 focus:ring-emerald-400"></textarea>
+                <button v-if="form.p115_cookie" @click="form.p115_cookie = ''"
+                  type="button" title="清空输入框"
+                  class="absolute top-2 right-2 w-5 h-5 flex items-center justify-center rounded text-slate-400 hover:text-slate-700 hover:bg-slate-100">
+                  ✕
+                </button>
+              </div>
+              <p class="text-[11px] text-slate-400 mt-1 break-words">
+                保存后会写入 <code class="mono">/app/data/115-cookies.txt</code>（权限 600）。
+                <span v-if="settings.p115_cookie_set">
+                  当前已保存：<code class="mono break-all">{{ settings.p115_cookie_masked }}</code>
+                </span>
+              </p>
+            </div>
+            <div class="grid gap-4 sm:grid-cols-3 xl:grid-cols-3">
+              <div>
+                <label class="block text-xs text-slate-500 mb-1">云下载轮询间隔（秒）</label>
+                <input v-model.number="form.p115_poll_interval" type="number" min="30"
+                  class="w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                <p class="text-[11px] text-slate-400 mt-1">建议 300～600 秒</p>
+              </div>
+              <div>
+                <label class="block text-xs text-slate-500 mb-1">超时阈值（小时）</label>
+                <input :value="thresholdHours" @input="form.p115_timeout_threshold = Math.max(1,Number($event.target.value)) * 3600"
+                  type="number" min="1" step="0.5"
+                  class="w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                <p class="text-[11px] text-slate-400 mt-1">超过此时长的未完成任务会被取消</p>
+              </div>
+              <div>
+                <label class="block text-xs text-slate-500 mb-1">每页任务数</label>
+                <input v-model.number="form.p115_task_page_size" type="number" min="10" max="200"
+                  class="w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                <p class="text-[11px] text-slate-400 mt-1">每次拉取的任务条数</p>
+              </div>
+            </div>
+            <label class="flex items-start gap-2 text-sm">
+              <input type="checkbox" v-model="form.p115_auto_cancel" class="rounded mt-0.5 shrink-0">
+              <span>超过阈值时自动取消云下载任务
+                <span class="text-slate-400">（只移除离线任务，不删除已下载文件）</span>
+              </span>
+            </label>
+          </div>
+          <div class="flex flex-wrap gap-2 mt-4">
+            <button @click="testP115()" :disabled="testing.p115"
+              class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-sm disabled:opacity-50">
+              {{ testing.p115?'测试中…':'连接测试' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- Webhook -->
+        <div class="bg-white rounded-lg border border-slate-200 p-5">
+          <h3 class="font-medium mb-2 flex items-center gap-2">
+            CD2 Webhook
+            <span class="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 font-normal">可选功能</span>
+          </h3>
+          <p class="text-xs text-slate-500 mb-3 leading-relaxed">
+            <strong>作用</strong>：CD2 的上传任务接口只提供目标路径，不提供源文件路径。
+            接入 Webhook 后，CD2 会在文件变化时主动推送真实源路径，
+            使<strong>规则匹配更准确</strong>，并让「取消后重新上传」能工作。
+            <br>
+            <strong>不配置也能用</strong>，只是源路径匹配会退化为用目标路径推断。
+          </p>
+
+          <!-- 步骤 1：回调地址 -->
+          <div class="mb-3">
+            <div class="text-xs font-medium text-slate-600 mb-1">① 回调地址（本服务）</div>
+            <div class="flex gap-2">
+              <div class="mono text-xs bg-slate-900 text-emerald-300 p-3 rounded break-all flex-1">
+                {{ webhookUrl }}
+              </div>
+              <button @click="copyText(webhookUrl)" type="button"
+                class="px-3 text-xs rounded bg-slate-100 hover:bg-slate-200 shrink-0">复制</button>
+            </div>
+            <p class="text-[11px] text-slate-400 mt-1">
+              注意：这个地址是给 <strong>CD2 所在机器</strong>访问的，
+              如果 CD2 在另一个容器里，请把域名部分换成它能访问到的地址
+              （如宿主机 IP）。
+            </p>
+          </div>
+
+          <!-- 步骤 2：配置方式 -->
+          <div class="mb-3">
+            <div class="text-xs font-medium text-slate-600 mb-1">
+              ② 在 CD2 里配置（三种方式任选其一）
+            </div>
+            <div class="text-[11px] text-slate-500 space-y-1 mb-2 ml-1">
+              <div>
+                <strong>方式 A（推荐）</strong>：打开 CD2 网页 →
+                右上角设置 → <strong>Webhook</strong> 页面 → 按下方模板填写并勾选启用。
+              </div>
+              <div>
+                <strong>方式 B</strong>：编辑 CD2 配置文件 <code class="mono">config.toml</code>
+                （位于 CD2 的 <code class="mono">/Config</code> 目录），粘贴下方模板后重启 CD2。
+              </div>
+              <div>
+                <strong>方式 C</strong>：调用 CD2 的 gRPC 接口
+                <code class="mono">GetWebhookConfigTemplate</code> 获取模板再修改。
+              </div>
+            </div>
+            <div class="flex gap-2">
+              <pre class="flex-1 mono text-[11px] leading-relaxed bg-slate-900 text-slate-200 p-3 rounded overflow-auto max-h-72">{{ webhookTemplate }}</pre>
+              <button @click="copyText(webhookTemplate)" type="button"
+                class="px-3 text-xs rounded bg-slate-100 hover:bg-slate-200 shrink-0 self-start">复制</button>
+            </div>
+          </div>
+
+          <!-- 步骤 3：验证 -->
+          <div class="mb-3">
+            <div class="text-xs font-medium text-slate-600 mb-1">③ 验证是否生效</div>
+            <p class="text-[11px] text-slate-500 ml-1">
+              在 CD2 监控的源目录里新建一个文件，几秒后点下面的按钮，
+              能看到该文件名即表示 Webhook 已生效。
+            </p>
+            <button @click="checkWebhook()" type="button"
+              class="mt-2 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded text-xs">
+              查看已收到的源路径记录
+            </button>
+            <div v-if="webhookRecords.length" class="mt-2 border rounded overflow-hidden">
+              <table class="w-full text-[11px]">
+                <thead class="bg-slate-50 text-slate-500">
+                  <tr>
+                    <th class="px-2 py-1 text-left">文件名</th>
+                    <th class="px-2 py-1 text-left">源路径</th>
+                    <th class="px-2 py-1 text-left">时间</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="r in webhookRecords.slice(0, 8)" :key="r.id" class="border-t">
+                    <td class="px-2 py-1 max-w-[10rem] truncate" :title="r.file_name">{{ r.file_name }}</td>
+                    <td class="px-2 py-1 mono text-slate-500 max-w-[16rem] truncate" :title="r.source_path">{{ r.source_path }}</td>
+                    <td class="px-2 py-1 text-slate-400 whitespace-nowrap">{{ fmtTime(r.seen_at) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-else-if="webhookChecked" class="mt-2 text-[11px] text-amber-600">
+              还没有收到任何记录。请检查 CD2 侧 Webhook 是否已启用、地址是否可达。
+            </div>
+          </div>
+
+          <div class="pt-3 border-t border-slate-100">
+            <label class="block text-xs text-slate-500 mb-1">Webhook 鉴权 Token（可选）</label>
+            <input v-model="form.webhook_token" :placeholder="settings.webhook_token_set?'已设置，留空不修改':'留空表示不校验（内网环境建议留空）'"
+              class="w-full px-3 py-2 border border-slate-300 rounded-md text-sm mono focus:outline-none focus:ring-2 focus:ring-emerald-400">
+            <p class="text-[11px] text-slate-400 mt-1">
+              填写后，需在模板的 <code class="mono">[global_params.default_headers]</code>
+              中设置相同的 <code class="mono">authorization</code> 值，否则请求会被拒绝（401）。
+            </p>
+          </div>
+        </div>
+
+        <div class="flex gap-2">
+          <button @click="saveSettings()" :disabled="saving"
+            class="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-md text-sm">
+            {{ saving?'保存中…':'保存设置' }}
+          </button>
+          <button @click="loadSettings()" class="px-4 py-2 bg-slate-100 hover:bg-slate-200 rounded-md text-sm">
+            重置
+          </button>
+        </div>
+
+      </div>
+
+      <!-- ============ 事件日志 ============ -->
+      <div v-if="tab==='logs'" class="space-y-4">
+        <div class="flex flex-wrap gap-2 items-center">
+          <button v-for="lv in logLevels" :key="lv.key" type="button"
+            @click="logLevel = (logLevel === lv.key ? '' : lv.key); loadEvents()"
+            :class="['px-2.5 py-1 rounded-md text-xs border transition',
+              logLevel === lv.key
+                ? 'bg-slate-800 text-white border-slate-800'
+                : 'bg-white border-slate-200 hover:border-slate-400']">
+            {{ lv.label }}
+          </button>
+          <div class="flex-1"></div>
+          <label class="flex items-center gap-1.5 text-xs text-slate-500">
+            <input type="checkbox" v-model="logAutoRefresh" class="rounded">
+            自动刷新
+          </label>
+          <button @click="loadEvents()" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-sm">
+            刷新
+          </button>
+        </div>
+
+        <div class="bg-white rounded-lg border border-slate-200 overflow-hidden">
+          <table class="w-full text-sm">
+            <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+              <tr>
+                <th class="px-3 py-2.5 text-left w-40">时间</th>
+                <th class="px-3 py-2.5 text-left w-20">级别</th>
+                <th class="px-3 py-2.5 text-left w-24">来源</th>
+                <th class="px-3 py-2.5 text-left">内容</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template v-for="e in events" :key="e.id">
+                <tr class="border-t border-slate-100 hover:bg-slate-50/60 cursor-pointer"
+                  @click="e._open = !e._open">
+                  <td class="px-3 py-2 text-xs text-slate-500 whitespace-nowrap mono">{{ fmtTime(e.created_at) }}</td>
+                  <td class="px-3 py-2">
+                    <span :class="['text-[11px] px-1.5 py-0.5 rounded', logLevelClass(e.level)]">
+                      {{ logLevelLabel(e.level) }}
+                    </span>
+                  </td>
+                  <td class="px-3 py-2 text-xs text-slate-500">{{ e.source }}</td>
+                  <td class="px-3 py-2 text-xs">
+                    <div class="flex items-start gap-1">
+                      <span v-if="e.detail" class="text-slate-400 shrink-0 w-3">{{ e._open ? '▾' : '▸' }}</span>
+                      <span class="break-words" :class="e._open ? '' : 'line-clamp-2'">{{ e.message }}</span>
+                    </div>
+                    <div v-if="e._open && e.detail"
+                      class="mt-1.5 p-2 bg-slate-50 rounded text-[11px] text-slate-600 mono whitespace-pre-wrap break-all">
+                      {{ e.detail }}
+                    </div>
+                  </td>
+                </tr>
+              </template>
+              <tr v-if="!events.length">
+                <td colspan="4" class="px-4 py-12 text-center text-slate-400 text-sm">
+                  {{ logLevel ? '该级别下暂无事件' : '暂无事件' }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="text-xs text-slate-400">
+          显示最近 {{ events.length }} 条。CD2 断连、115 Cookie 失效、任务拦截与重试等都会记录在这里，便于排查问题。
+        </p>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- ===================== 规则编辑弹窗 ===================== -->
+  <div v-if="ruleEditor.open" class="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50" @click.self="ruleEditor.open=false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-auto">
+      <div class="px-5 py-4 border-b flex items-center justify-between">
+        <h3 class="font-semibold">{{ ruleEditor.id ? '编辑规则' : '新建规则' }}</h3>
+        <button @click="ruleEditor.open=false" class="text-slate-400 hover:text-slate-700">✕</button>
+      </div>
+      <div class="p-5 space-y-4">
+        <div class="grid sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs text-slate-500 mb-1">规则名称 *</label>
+            <input v-model="ruleEditor.name" class="w-full px-3 py-2 border rounded-md text-sm focus:ring-2 focus:ring-emerald-400 focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-xs text-slate-500 mb-1">优先级（越小越先匹配）</label>
+            <input v-model.number="ruleEditor.priority" type="number"
+              class="w-full px-3 py-2 border rounded-md text-sm focus:ring-2 focus:ring-emerald-400 focus:outline-none">
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs text-slate-500 mb-1">源文件夹路径关键字（每行一个，任意命中即生效）*</label>
+          <textarea v-model="ruleEditor.source_keywords" rows="3"
+            placeholder="PT&#10;/mnt/local/movies"
+            class="w-full px-3 py-2 border rounded-md text-sm mono focus:ring-2 focus:ring-emerald-400 focus:outline-none"></textarea>
+          <label class="flex items-center gap-2 text-sm mt-2">
+            <input type="checkbox" v-model="ruleEditor.is_regex" class="rounded">
+            按正则表达式解释（精确限定目录请用 <span class="mono text-xs">/PT/</span>）
+          </label>
+        </div>
+
+        <div class="grid sm:grid-cols-3 gap-4">
+          <div>
+            <label class="block text-xs text-slate-500 mb-1">超时阈值（秒）*</label>
+            <input v-model.number="ruleEditor.timeout_threshold" type="number" min="1"
+              class="w-full px-3 py-2 border rounded-md text-sm focus:ring-2 focus:ring-emerald-400 focus:outline-none">
+            <p class="text-[11px] text-slate-400 mt-1">{{ fmtDur(ruleEditor.timeout_threshold) }}</p>
+          </div>
+          <div>
+            <label class="block text-xs text-slate-500 mb-1">最大重试次数</label>
+            <input v-model.number="ruleEditor.max_retry" type="number" min="0"
+              class="w-full px-3 py-2 border rounded-md text-sm focus:ring-2 focus:ring-emerald-400 focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-xs text-slate-500 mb-1">重试间隔（秒）</label>
+            <input v-model.number="ruleEditor.retry_interval" type="number" min="1"
+              class="w-full px-3 py-2 border rounded-md text-sm focus:ring-2 focus:ring-emerald-400 focus:outline-none">
+            <p class="text-[11px] text-slate-400 mt-1">{{ fmtDur(ruleEditor.retry_interval) }}</p>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs text-slate-500 mb-1">适用的上传来源类型</label>
+          <select v-model="ruleEditor.operator_filter"
+            class="w-full px-3 py-2 border rounded-md text-sm">
+            <option value="any">全部</option>
+            <option value="backup">备份任务（推荐）</option>
+            <option value="copy">拷贝任务</option>
+            <option value="mount">挂载写入</option>
+            <option value="remote">远程上传</option>
+          </select>
+        </div>
+
+        <!-- 关键字实时校验 -->
+        <div>
+          <label class="block text-xs text-slate-500 mb-1">命中预览（可选，每行一个测试路径）</label>
+          <textarea v-model="ruleEditor.testPaths" rows="2"
+            class="w-full px-3 py-2 border rounded-md text-xs mono"></textarea>
+          <button @click="validateKeywords()" class="mt-2 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded text-xs">
+            校验并预览
+          </button>
+          <div v-if="ruleEditor.validation" class="mt-2 text-xs space-y-1">
+            <div v-for="e in ruleEditor.validation.errors" :key="e" class="text-amber-600">⚠ {{ e }}</div>
+            <div v-for="m in ruleEditor.validation.matched" :key="m" class="text-emerald-600">✓ 命中：{{ m }}</div>
+            <div v-for="u in ruleEditor.validation.unmatched" :key="u" class="text-slate-400">✗ 未命中：{{ u }}</div>
+          </div>
+        </div>
+      </div>
+      <div class="px-5 py-4 border-t flex justify-end gap-2">
+        <button @click="ruleEditor.open=false" class="px-4 py-2 text-sm rounded-md hover:bg-slate-100">取消</button>
+        <button @click="saveRule()" :disabled="saving"
+          class="px-4 py-2 text-sm rounded-md bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
+          {{ saving?'保存中…':'保存' }}
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const { createApp, reactive, ref, computed, onMounted, onUnmounted } = Vue;
+
+const api = async (method, path, body) => {
+  const opt = { method, headers: {} };
+  if (body !== undefined) {
+    opt.headers['Content-Type'] = 'application/json';
+    opt.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, opt);
+  if (res.status === 204) return null;
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = { detail: text }; }
+  if (!res.ok) {
+    const msg = (data && (data.detail || data.error)) || `HTTP ${res.status}`;
+    throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+  }
+  return data;
+};
+
+createApp({
+  setup() {
+    const tab = ref('dashboard');
+    const version = ref('1.0.0');
+    const loading = ref(false);
+    const saving = ref(false);
+    const lastRefresh = ref(Date.now());
+    const nowTick = ref(Date.now());
+    const toast = reactive({ text: '', type: 'info' });
+    const testing = reactive({ cd2: false, p115: false, token: false });
+
+    const tabs = [
+      { key: 'dashboard', label: '仪表盘', icon: '📊', desc: '连接状态与关键指标总览' },
+      { key: 'rules',     label: 'CD2 规则', icon: '⚙️', desc: '配置源路径关键字、超时阈值与重试策略' },
+      { key: 'tasks',     label: '任务监控', icon: '📤', desc: '实时上传、秒传记录与重试队列' },
+      { key: 'p115',      label: '115 云下载', icon: '☁️', desc: '云下载任务、超时阈值与取消日志' },
+      { key: 'logs',      label: '事件日志', icon: '📋', desc: '系统事件、异常与任务操作记录' },
+      { key: 'bt',        label: 'BT 流量', icon: '📶', desc: 'qBittorrent / Transmission 上传流量监控与自动限速' },
+      { key: 'settings',  label: '系统设置', icon: '🔧', desc: 'CD2 / 115 连接配置与 Webhook' },
+    ];
+
+    const dash = reactive({
+      cd2: {}, p115: {}, stats: {}, scheduler: { jobs: [] },
+    });
+    const rules = ref([]);
+    const liveTasks = ref([]);
+    const instantPage = reactive({ items: [], total: 0, page: 1, page_size: 50 });
+    const nonInstantPage = reactive({ items: [], total: 0, page: 1, page_size: 50 });
+    const offlineTasks = ref([]);
+    const cancelLogsPage = reactive({ items: [], total: 0, page: 1, page_size: 50 });
+    const events = ref([]);
+    // ---- 事件日志页 ----
+    const logLevel = ref('');
+
+    // ---- BT 流量页 ----
+    // 子服务是独立的 Go 程序，自带完整 UI，通过 /btg/* 反代嵌入 iframe。
+    // 这样 Go 侧代码零改动、功能 100% 保留。
+    const btg = reactive({
+      available: false, running: false, healthy: false,
+      enabled: true, pid: 0, restart_count: 0, last_error: '',
+    });
+    const btgBusy = ref(false);
+    const btgFrameKey = ref(0);
+    const logAutoRefresh = ref(false);
+    const logLevels = [
+      { key: 'error',   label: '错误' },
+      { key: 'warning', label: '警告' },
+      { key: 'info',    label: '信息' },
+    ];
+    const logLevelLabel = (lv) => ({ error: '错误', warning: '警告', info: '信息' }[lv] || lv);
+    const logLevelClass = (lv) => ({
+      error: 'bg-rose-100 text-rose-700',
+      warning: 'bg-amber-100 text-amber-700',
+      info: 'bg-slate-100 text-slate-600',
+    }[lv] || 'bg-slate-100 text-slate-600');
+    const settings = reactive({ cd2_token_set: false, p115_cookie_set: false, webhook_token_set: false });
+    const p115Config = reactive({ timeout_threshold: 86400, poll_interval: 300, auto_cancel: true });
+
+    const form = reactive({
+      cd2_host: '', cd2_token: '', cd2_username: '', cd2_password: '', cd2_poll_interval: 3,
+      p115_cookie: '', p115_poll_interval: 300, p115_timeout_threshold: 86400,
+      p115_auto_cancel: true, p115_task_page_size: 30, webhook_token: '',
+    });
+
+    const taskTab = ref('live');
+    const p115Tab = ref('list');
+    const instantQuery = ref('');
+    const retryQuery = ref('');
+    const retryStatus = ref('');
+    const selectedRetry = ref([]);
+
+    const ruleEditor = reactive({
+      open: false, id: null, name: '', source_keywords: '', is_regex: false,
+      timeout_threshold: 60, max_retry: 3, retry_interval: 300, priority: 100,
+      operator_filter: 'any', testPaths: '', validation: null,
+    });
+
+    // ---------- 工具函数 ----------
+    const showToast = (text, type = 'info') => {
+      toast.text = text; toast.type = type;
+      setTimeout(() => { if (toast.text === text) toast.text = ''; }, 5000);
+    };
+    const fmtDur = (sec) => {
+      if (!sec || sec < 0) return '0秒';
+      sec = Math.floor(sec);
+      if (sec < 60) return sec + '秒';
+      if (sec < 3600) return Math.floor(sec/60) + '分' + (sec%60 ? (sec%60)+'秒' : '');
+      if (sec < 86400) return Math.floor(sec/3600) + '时' + (Math.floor(sec%3600/60) ? Math.floor(sec%3600/60)+'分' : '');
+      return Math.floor(sec/86400) + '天' + (Math.floor(sec%86400/3600) ? Math.floor(sec%86400/3600)+'时' : '');
+    };
+    const fmtSize = (b) => {
+      if (!b) return '0 B';
+      const u = ['B','KB','MB','GB','TB'];
+      let i = 0, n = b;
+      while (n >= 1024 && i < u.length-1) { n /= 1024; i++; }
+      return n.toFixed(i ? 2 : 0) + ' ' + u[i];
+    };
+    const fmtTime = (ts) => {
+      if (!ts) return '—';
+      const d = new Date(ts * 1000);
+      const p = (n) => String(n).padStart(2,'0');
+      return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    };
+    const fmtAgo = (ts) => {
+      if (!ts) return '—';
+      const diff = Math.floor(nowTick.value/1000 - ts);
+      if (diff < 0) return '即将';
+      if (diff < 5) return '刚刚';
+      if (diff < 3600) return diff + ' 秒前';
+      if (diff < 86400) return Math.floor(diff/3600) + ' 小时前';
+      return Math.floor(diff/86400) + ' 天前';
+    };
+    const statusClass = (e) => {
+      if (e === 5) return 'bg-emerald-100 text-emerald-700';
+      if (e === 3 || e === 7) return 'bg-sky-100 text-sky-700';
+      if (e === 9 || e === 10) return 'bg-rose-100 text-rose-700';
+      if (e === 4) return 'bg-amber-100 text-amber-700';
+      return 'bg-slate-100 text-slate-600';
+    };
+    const retryStatusLabel = (s) => ({waiting:'等待重试',retrying:'重试中',success:'重试成功',failed:'最终失败',cancelled:'已取消'}[s] || s);
+    const retryStatusClass = (s) => ({
+      waiting:'bg-amber-100 text-amber-700', retrying:'bg-sky-100 text-sky-700',
+      success:'bg-emerald-100 text-emerald-700', failed:'bg-rose-100 text-rose-700',
+      cancelled:'bg-slate-200 text-slate-600'}[s] || 'bg-slate-100');
+    const p115StatusLabel = (s) => ({waiting:'等待中',downloading:'下载中',finished:'已完成',failed:'失败',cancelled:'已取消',removed:'已移除'}[s] || s);
+    const p115StatusClass = (s) => ({
+      waiting:'bg-slate-100 text-slate-600', downloading:'bg-sky-100 text-sky-700',
+      finished:'bg-emerald-100 text-emerald-700', failed:'bg-rose-100 text-rose-700',
+      cancelled:'bg-amber-100 text-amber-700', removed:'bg-slate-200 text-slate-500'}[s] || 'bg-slate-100');
+
+    // ---------- 载入 ----------
+    const loadDashboard = async () => {
+      const d = await api('GET', '/api/dashboard');
+      Object.assign(dash, d);
+    };
+    const loadRules = async () => { rules.value = await api('GET', '/api/rules'); };
+    const loadLive = async () => { liveTasks.value = await api('GET', '/api/tasks/live'); };
+    const loadInstant = async (page = 1) => {
+      const p = new URLSearchParams({ page, page_size: 50, q: instantQuery.value });
+      const d = await api('GET', '/api/tasks/instant?' + p);
+      Object.assign(instantPage, d);
+    };
+    const loadNonInstant = async (page = 1) => {
+      const p = new URLSearchParams({ page, page_size: 50, q: retryQuery.value });
+      if (retryStatus.value) p.set('status', retryStatus.value);
+      const d = await api('GET', '/api/tasks/non-instant?' + p);
+      Object.assign(nonInstantPage, d);
+      selectedRetry.value = [];
+    };
+    const loadOffline = async () => { offlineTasks.value = await api('GET', '/api/p115/offline'); };
+    const loadP115Config = async () => {
+      const d = await api('GET', '/api/p115/config');
+      Object.assign(p115Config, d);
+    };
+    const loadCancelLogs = async (page = 1) => {
+      const p = new URLSearchParams({ page, page_size: 50 });
+      const d = await api('GET', '/api/p115/cancel-logs?' + p);
+      Object.assign(cancelLogsPage, d);
+    };
+    const loadEvents = async () => {
+      let url = '/api/settings/events?limit=200';
+      if (logLevel.value) url += '&level=' + encodeURIComponent(logLevel.value);
+      const rows = await api('GET', url);
+      // 保留展开状态，避免自动刷新时折叠
+      const openMap = new Map((events.value || []).map((e) => [e.id, e._open]));
+      events.value = (rows || []).map((e) => ({ ...e, _open: !!openMap.get(e.id) }));
+    };
+    const loadSettings = async () => {
+      const d = await api('GET', '/api/settings');
+      Object.assign(settings, d);
+      form.cd2_host = d.cd2_host;
+      form.cd2_username = d.cd2_username;
+      form.cd2_poll_interval = d.cd2_poll_interval;
+      form.p115_poll_interval = d.p115_poll_interval;
+      form.p115_timeout_threshold = d.p115_timeout_threshold;
+      form.p115_auto_cancel = d.p115_auto_cancel;
+      form.p115_task_page_size = d.p115_task_page_size;
+      // 敏感字段不回填，避免误覆盖
+      form.cd2_token = '';
+      form.cd2_password = '';
+      form.p115_cookie = '';
+      form.webhook_token = '';
+    };
+
+    const refreshAll = async () => {
+      loading.value = true;
+      try {
+        await loadDashboard();
+        if (tab.value === 'rules') await loadRules();
+        if (tab.value === 'tasks') {
+          await loadLive();
+          if (taskTab.value === 'instant') await loadInstant(instantPage.page);
+          if (taskTab.value === 'retry') await loadNonInstant(nonInstantPage.page);
+        }
+        if (tab.value === 'p115') {
+          await loadOffline();
+          await loadP115Config();
+          if (p115Tab.value === 'logs') await loadCancelLogs(cancelLogsPage.page);
+        }
+        if (tab.value === 'settings') await loadSettings();
+        if (tab.value === 'logs') await loadEvents();
+        if (tab.value === 'bt') await loadBtgStatus();
+        lastRefresh.value = Date.now();
+      } catch (e) {
+        showToast('刷新失败：' + e.message, 'error');
+      } finally {
+        loading.value = false;
+      }
+    };
+
+    // ---------- BT 流量 ----------
+    const btgFrameUrl = computed(() => '/btg/');
+
+    const loadBtgStatus = async () => {
+      try {
+        const d = await api('GET', '/api/btg/status');
+        Object.assign(btg, d);
+      } catch (e) {
+        btg.running = false;
+        btg.healthy = false;
+        btg.last_error = e.message;
+      }
+    };
+
+    const reloadBtgFrame = () => {
+      // 改 key 强制 iframe 重新挂载，绕过缓存
+      btgFrameKey.value += 1;
+      loadBtgStatus();
+    };
+
+    const restartBtg = async () => {
+      btgBusy.value = true;
+      try {
+        const r = await api('POST', '/api/btg/restart');
+        showToast(r.message || (r.ok ? '已重启' : '重启失败'), r.ok ? 'success' : 'error');
+        await loadBtgStatus();
+        // 子服务需要几秒才可用，稍后再刷新一次 iframe
+        setTimeout(() => { btgFrameKey.value += 1; loadBtgStatus(); }, 3000);
+      } catch (e) {
+        showToast('重启失败：' + e.message, 'error');
+      } finally {
+        btgBusy.value = false;
+      }
+    };
+
+    // ---------- 页签与 URL 同步 ----------
+    // 把当前页签写进 URL hash（如 #tasks），刷新后能回到原页。
+    // 之前没有做这件事，刷新总是跳回仪表盘。
+    const TAB_KEYS = ['dashboard', 'rules', 'tasks', 'p115', 'logs', 'bt', 'settings'];
+
+    const readTabFromHash = () => {
+      const raw = (location.hash || '').replace(/^#\/?/, '').trim();
+      // 支持 #tasks 与 #tasks/live 这类写法，取第一段
+      const key = raw.split('/')[0];
+      return TAB_KEYS.includes(key) ? key : 'dashboard';
+    };
+
+    const writeTabToHash = (key) => {
+      const target = `#${key}`;
+      if (location.hash !== target) {
+        // 用 replaceState 避免污染浏览器前进/后退历史
+        try {
+          history.replaceState(null, '', target);
+        } catch {
+          location.hash = key;
+        }
+      }
+    };
+
+    const switchTab = async (key) => {
+      tab.value = key;
+      writeTabToHash(key);
+      await refreshAll();
+    };
+
+    // 浏览器前进/后退时同步页签
+    const onHashChange = async () => {
+      const key = readTabFromHash();
+      if (key !== tab.value) {
+        tab.value = key;
+        await refreshAll();
+      }
+    };
+
+    // ---------- 规则操作 ----------
+    const openRuleEditor = (r = null) => {
+      ruleEditor.validation = null;
+      ruleEditor.testPaths = '';
+      if (r) {
+        Object.assign(ruleEditor, {
+          open: true, id: r.id, name: r.name, source_keywords: r.source_keywords,
+          is_regex: r.is_regex, timeout_threshold: r.timeout_threshold,
+          max_retry: r.max_retry, retry_interval: r.retry_interval,
+          priority: r.priority, operator_filter: r.operator_filter,
+        });
+      } else {
+        Object.assign(ruleEditor, {
+          open: true, id: null, name: '', source_keywords: '', is_regex: false,
+          timeout_threshold: 60, max_retry: 3, retry_interval: 300, priority: 100,
+          operator_filter: 'any',
+        });
+      }
+    };
+
+    const saveRule = async () => {
+      if (!ruleEditor.name.trim()) return showToast('请填写规则名称', 'error');
+      if (!ruleEditor.source_keywords.trim()) return showToast('请填写至少一个关键字', 'error');
+      saving.value = true;
+      try {
+        const payload = {
+          name: ruleEditor.name.trim(),
+          source_keywords: ruleEditor.source_keywords,
+          is_regex: ruleEditor.is_regex,
+          timeout_threshold: Number(ruleEditor.timeout_threshold),
+          max_retry: Number(ruleEditor.max_retry),
+          retry_interval: Number(ruleEditor.retry_interval),
+          priority: Number(ruleEditor.priority),
+          operator_filter: ruleEditor.operator_filter,
+        };
+        if (ruleEditor.id) {
+          await api('PUT', '/api/rules/' + ruleEditor.id, payload);
+        } else {
+          await api('POST', '/api/rules', payload);
+        }
+        ruleEditor.open = false;
+        showToast('规则已保存', 'success');
+        await loadRules();
+      } catch (e) {
+        showToast(e.message, 'error');
+      } finally {
+        saving.value = false;
+      }
+    };
+
+    const toggleRule = async (r) => {
+      try {
+        await api('PATCH', `/api/rules/${r.id}/toggle`, { enabled: !r.enabled });
+        await loadRules();
+      } catch (e) { showToast(e.message, 'error'); }
+    };
+
+    const deleteRule = async (r) => {
+      if (!confirm(`确认删除规则「${r.name}」？`)) return;
+      try {
+        await api('DELETE', '/api/rules/' + r.id);
+        showToast('已删除', 'success');
+        await loadRules();
+      } catch (e) { showToast(e.message, 'error'); }
+    };
+
+    const validateKeywords = async () => {
+      try {
+        const paths = ruleEditor.testPaths.split('\n').map(s => s.trim()).filter(Boolean);
+        ruleEditor.validation = await api('POST', '/api/rules/validate', {
+          source_keywords: ruleEditor.source_keywords,
+          is_regex: ruleEditor.is_regex,
+          test_paths: paths,
+        });
+      } catch (e) { showToast(e.message, 'error'); }
+    };
+
+    // ---------- 任务操作 ----------
+    const toggleAllRetry = (e) => {
+      selectedRetry.value = e.target.checked ? nonInstantPage.items.map(i => i.id) : [];
+    };
+    const allRetrySelected = computed(() =>
+      nonInstantPage.items.length > 0 && selectedRetry.value.length === nonInstantPage.items.length);
+
+    const batchRetry = async () => {
+      try {
+        const r = await api('POST', '/api/tasks/non-instant/retry', { ids: selectedRetry.value });
+        showToast(r.message, r.affected ? 'success' : 'error');
+        await loadNonInstant(nonInstantPage.page);
+      } catch (e) { showToast(e.message, 'error'); }
+    };
+    const singleRetry = async (row) => {
+      try {
+        const r = await api('POST', '/api/tasks/non-instant/retry', { ids: [row.id] });
+        showToast(r.message, r.affected ? 'success' : 'error');
+        await loadNonInstant(nonInstantPage.page);
+      } catch (e) { showToast(e.message, 'error'); }
+    };
+    const batchCancelRetry = async () => {
+      try {
+        const r = await api('POST', '/api/tasks/non-instant/cancel', { ids: selectedRetry.value });
+        showToast(r.message, 'success');
+        await loadNonInstant(nonInstantPage.page);
+      } catch (e) { showToast(e.message, 'error'); }
+    };
+    const batchDeleteRetry = async () => {
+      if (!confirm(`确认删除选中的 ${selectedRetry.value.length} 条记录？`)) return;
+      try {
+        const r = await api('DELETE', '/api/tasks/non-instant?ids=' + selectedRetry.value.join(','));
+        showToast(r.message, 'success');
+        await loadNonInstant(nonInstantPage.page);
+      } catch (e) { showToast(e.message, 'error'); }
+    };
+    const deleteRetryOne = async (row) => {
+      try {
+        await api('DELETE', '/api/tasks/non-instant?ids=' + row.id);
+        await loadNonInstant(nonInstantPage.page);
+      } catch (e) { showToast(e.message, 'error'); }
+    };
+    const clearInstant = async () => {
+      if (!confirm('确认清空全部秒传记录？')) return;
+      try {
+        const r = await api('DELETE', '/api/tasks/instant');
+        showToast(r.message, 'success');
+        await loadInstant(1);
+      } catch (e) { showToast(e.message, 'error'); }
+    };
+
+    // ---------- 115 操作 ----------
+    const refreshOffline = async () => {
+      try {
+        const r = await api('POST', '/api/p115/offline/refresh');
+        showToast(r.message || '已刷新', r.ok ? 'success' : 'error');
+        await loadOffline();
+      } catch (e) { showToast(e.message, 'error'); }
+    };
+    const cancelOffline = async (t) => {
+      if (!confirm(`确认取消云下载任务「${t.name || t.info_hash}」？\n只移除离线任务，不删除已下载文件。`)) return;
+      try {
+        const r = await api('POST', '/api/p115/offline/cancel', { info_hashes: [t.info_hash] });
+        showToast(r.message, r.affected ? 'success' : 'error');
+        await loadOffline();
+      } catch (e) { showToast(e.message, 'error'); }
+    };
+    const clearCancelLogs = async () => {
+      if (!confirm('确认清空全部取消日志？')) return;
+      try {
+        const r = await api('DELETE', '/api/p115/cancel-logs');
+        showToast(r.message, 'success');
+        await loadCancelLogs(1);
+      } catch (e) { showToast(e.message, 'error'); }
+    };
+
+    // ---------- 设置操作 ----------
+    const saveSettings = async () => {
+      saving.value = true;
+      try {
+        const payload = {};
+        // 只提交有值的字段；字符串留空表示不修改（后端约定）
+        if (form.cd2_host !== '') payload.cd2_host = form.cd2_host;
+        if (form.cd2_token !== '') payload.cd2_token = form.cd2_token;
+        if (form.cd2_username !== '') payload.cd2_username = form.cd2_username;
+        if (form.cd2_password !== '') payload.cd2_password = form.cd2_password;
+        if (form.cd2_poll_interval) payload.cd2_poll_interval = Number(form.cd2_poll_interval);
+        if (form.p115_cookie !== '') payload.p115_cookie = form.p115_cookie;
+        if (form.p115_poll_interval) payload.p115_poll_interval = Number(form.p115_poll_interval);
+        if (form.p115_timeout_threshold) payload.p115_timeout_threshold = Math.round(Number(form.p115_timeout_threshold));
+        if (form.p115_task_page_size) payload.p115_task_page_size = Number(form.p115_task_page_size);
+        if (form.p115_auto_cancel !== undefined) payload.p115_auto_cancel = form.p115_auto_cancel;
+        if (form.webhook_token !== '') payload.webhook_token = form.webhook_token;
+
+        await api('PUT', '/api/settings', payload);
+        // 关键：保存成功后清空所有敏感输入框。
+        // 否则刚粘贴的 Cookie/Token 会一直留在框里，
+        // 用户会误以为没保存成功，或与下方"已保存"提示重复显示造成错乱。
+        form.cd2_token = '';
+        form.cd2_password = '';
+        form.p115_cookie = '';
+        form.webhook_token = '';
+        showToast('设置已保存并应用', 'success');
+        await loadSettings();
+      } catch (e) {
+        showToast(e.message, 'error');
+      } finally {
+        saving.value = false;
+      }
+    };
+
+    const testCd2 = async () => {
+      testing.cd2 = true;
+      try {
+        const r = await api('POST', '/api/settings/test/cd2');
+        showToast(r.message || (r.ok ? '连接正常' : '连接失败'), r.ok ? 'success' : 'error');
+        await loadDashboard();
+      } catch (e) { showToast(e.message, 'error'); }
+      finally { testing.cd2 = false; }
+    };
+    const testP115 = async () => {
+      testing.p115 = true;
+      try {
+        const r = await api('POST', '/api/settings/test/p115');
+        showToast(r.message || (r.ok ? 'Cookie 有效' : 'Cookie 无效'), r.ok ? 'success' : 'error');
+        await loadDashboard();
+      } catch (e) { showToast(e.message, 'error'); }
+      finally { testing.p115 = false; }
+    };
+    const fetchToken = async () => {
+      testing.token = true;
+      try {
+        const r = await api('POST', '/api/settings/cd2/token');
+        showToast(r.message, r.ok ? 'success' : 'error');
+        if (r.ok) await loadSettings();
+      } catch (e) { showToast(e.message, 'error'); }
+      finally { testing.token = false; }
+    };
+
+    // ---------- 计算属性 ----------
+    const dashboardCards = computed(() => {
+      const s = dash.stats || {};
+      return [
+        { label: '今日秒传', value: s.today_instant ?? 0, hint: `累计 ${s.total_instant ?? 0} 条`, color: 'text-emerald-600' },
+        { label: '当前上传中', value: s.live_uploads ?? 0, hint: '监控范围内的任务', color: 'text-sky-600' },
+        { label: '等待重试', value: (s.waiting_retry ?? 0) + (s.retrying ?? 0), hint: `失败 ${s.retry_failed ?? 0} 条`, color: 'text-amber-600' },
+        { label: '今日云下载取消', value: s.today_cancelled_offline ?? 0, hint: `累计 ${s.total_cancelled_offline ?? 0} 条`, color: 'text-rose-600' },
+        { label: '启用规则', value: s.enabled_rules ?? 0, hint: `共 ${s.total_rules ?? 0} 条`, color: 'text-indigo-600' },
+      ];
+    });
+    const currentTab = computed(() => tabs.find(t => t.key === tab.value) || tabs[0]);
+    const taskSubTabs = computed(() => [
+      { key: 'live', label: '实时上传', count: dash.stats?.live_uploads || 0 },
+      { key: 'instant', label: '秒传详情', count: dash.stats?.today_instant || 0 },
+      { key: 'retry', label: '重试队列', count: (dash.stats?.waiting_retry || 0) + (dash.stats?.retrying || 0) },
+    ]);
+
+    // 重试队列各状态计数：点击可直接筛出对应记录。
+    // 解决「看到失败数字却找不到记录」的问题。
+    const retryStatChips = computed(() => {
+      const s = dash.stats || {};
+      return [
+        { key: 'waiting',   label: '等待重试', count: s.waiting_retry ?? 0,   cls: 'text-amber-600' },
+        { key: 'retrying',  label: '重试中',   count: s.retrying ?? 0,        cls: 'text-sky-600' },
+        { key: 'success',   label: '重试成功', count: s.retry_success ?? 0,   cls: 'text-emerald-600' },
+        { key: 'failed',    label: '最终失败', count: s.retry_failed ?? 0,    cls: 'text-rose-600' },
+        { key: 'cancelled', label: '已取消',   count: s.cancelled_retry ?? 0, cls: 'text-slate-500' },
+      ];
+    });
+    const p115SubTabs = [
+      { key: 'list', label: '任务列表' },
+      { key: 'logs', label: '取消日志' },
+    ];
+    const thresholdHours = computed({
+      get: () => Math.round((form.p115_timeout_threshold / 3600) * 10) / 10,
+      set: (v) => { form.p115_timeout_threshold = Math.max(1, Number(v)) * 3600; },
+    });
+    const webhookUrl = computed(() => {
+      const origin = window.location.origin;
+      return `${origin}/api/webhook/cd2/file_notify`;
+    });
+
+    // 可直接粘贴到 CD2 配置文件的完整模板
+    const webhookTemplate = computed(() => `[global_params]
+base_url = "${window.location.origin}"
+enabled = true
+
+[global_params.default_headers]
+content-type = "application/json"
+user-agent = "clouddrive2/{version}"
+
+[file_system_watcher]
+url = "{base_url}/api/webhook/cd2/file_notify?device_name={device_name}&user_name={user_name}"
+method = "POST"
+enabled = true
+body = '''
+{
+    "device_name": "{device_name}",
+    "user_name": "{user_name}",
+    "version": "{version}",
+    "event_category": "{event_category}",
+    "event_name": "{event_name}",
+    "event_time": "{event_time}",
+    "send_time": "{send_time}",
+    "data": [
+            {
+                "action": "{action}",
+                "is_dir": "{is_dir}",
+                "source_file": "{source_file}",
+                "destination_file": "{destination_file}"
+            }
+    ]
+}
+'''`);
+
+    const webhookRecords = ref([]);
+    const webhookChecked = ref(false);
+
+    const checkWebhook = async () => {
+      try {
+        webhookRecords.value = await api('GET', '/api/webhook/cd2/source-paths?limit=20');
+        webhookChecked.value = true;
+        if (webhookRecords.value.length) {
+          showToast(`已收到 ${webhookRecords.value.length} 条记录`, 'success');
+        }
+      } catch (e) {
+        showToast('查询失败：' + e.message, 'error');
+      }
+    };
+
+    const copyText = async (text) => {
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast('已复制到剪贴板', 'success');
+      } catch {
+        // 非 https / 无权限时的兜底
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand('copy');
+          showToast('已复制到剪贴板', 'success');
+        } catch {
+          showToast('复制失败，请手动选中后复制', 'error');
+        }
+        document.body.removeChild(ta);
+      }
+    };
+
+    const lastRefreshText = computed(() => fmtAgo(lastRefresh.value / 1000));
+
+    // ---------- 定时器 ----------
+    let timer = null;
+    onMounted(async () => {
+      // 先按 URL hash 恢复页签，再拉数据（避免先渲染仪表盘再跳走）
+      tab.value = readTabFromHash();
+      writeTabToHash(tab.value);
+      window.addEventListener('hashchange', onHashChange);
+
+      try {
+        const v = await api('GET', '/api/version');
+        version.value = v.version;
+      } catch { /* 忽略 */ }
+      await refreshAll();
+      await loadSettings();
+      // 每 10 秒刷新仪表盘与实时任务（只在相关页签）
+      timer = setInterval(async () => {
+        nowTick.value = Date.now();
+        try {
+          await loadDashboard();
+          if (tab.value === 'tasks' && taskTab.value === 'live') await loadLive();
+          // 事件日志页：按用户勾选自动刷新
+          if (tab.value === 'logs' && logAutoRefresh.value) await loadEvents();
+        } catch { /* 静默 */ }
+      }, 10000);
+    });
+    onUnmounted(() => {
+      if (timer) clearInterval(timer);
+      window.removeEventListener('hashchange', onHashChange);
+    });
+
+    return {
+      version, tab, tabs, currentTab, loading, saving, toast, dash, lastRefreshText,
+      rules, liveTasks, instantPage, nonInstantPage, offlineTasks, cancelLogsPage,
+      events, settings, form, p115Config, taskTab, p115Tab, taskSubTabs, p115SubTabs,
+      logLevel, logLevels, logAutoRefresh, logLevelLabel, logLevelClass,
+      btg, btgBusy, btgFrameKey, btgFrameUrl, reloadBtgFrame, restartBtg,
+      instantQuery, retryQuery, retryStatus, selectedRetry, allRetrySelected,
+      ruleEditor, dashboardCards, thresholdHours, webhookUrl, testing,
+      retryStatChips,
+      webhookTemplate, webhookRecords, webhookChecked, checkWebhook, copyText,
+      switchTab, refreshAll, fmtDur, fmtSize, fmtTime, fmtAgo,
+      statusClass, retryStatusLabel, retryStatusClass, p115StatusLabel, p115StatusClass,
+      openRuleEditor, saveRule, toggleRule, deleteRule, validateKeywords,
+      toggleAllRetry, batchRetry, singleRetry, batchCancelRetry, batchDeleteRetry,
+      deleteRetryOne, clearInstant, loadInstant, loadNonInstant,
+      refreshOffline, cancelOffline, clearCancelLogs, loadCancelLogs,
+      saveSettings, loadSettings, testCd2, testP115, fetchToken, loadEvents,
+    };
+  }
+}).mount('#app');
+</script>
+</body>
+</html>

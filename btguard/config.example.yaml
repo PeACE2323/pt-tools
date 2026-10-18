@@ -1,0 +1,181 @@
+# ===========================================================================
+# BT Traffic Guard 配置示例
+#
+# 把本文件复制为 config.yaml 后按需修改，
+# 或直接启动容器让它自动生成一份默认配置再编辑。
+#
+# 单位约定：
+#   阈值（threshold_*）  = 字节（B）。可用 500GiB / 1.5TB 这类写法。
+#   限速（limit_*）      = 字节/秒（B/s）。0 表示不限速。1024*1024 = 1 MiB/s。
+#   周期（window）       = 时长。支持 30m / 24h / 7d / 30d / 1w。
+# ===========================================================================
+
+# Web 面板监听地址
+listen: ":8080"
+
+# 运行数据目录
+data_dir: "/data"
+
+# 采集间隔。越小曲线越平滑，但对下载器的 API 压力越大。
+# 建议 3s ~ 10s。
+poll_interval: 5s
+
+# 日志级别：debug / info / warn / error
+log_level: info
+
+# 时区。影响「自然日/自然周/自然月」的周期边界。
+# 留空则使用容器本地时区（即 TZ 环境变量）。
+timezone: ""
+
+# 实时曲线保留的采样点数
+history_points: 720
+
+# ---------------------------------------------------------------------------
+# 被监控的下载器
+# ---------------------------------------------------------------------------
+clients:
+  # ---- qBittorrent ----
+  - name: qbittorrent          # 唯一名称，策略里用它来指定作用对象
+    type: qbittorrent
+    # WebUI 地址。注意：如果容器用的是 bridge 网络，
+    # 这里要填宿主机（Unraid）的局域网 IP，不能用 127.0.0.1。
+    url: "http://192.168.1.10:8080"
+
+    # ----- 认证方式二选一 -----
+    #
+    # 推荐：API Key（需要 qBittorrent 5.2.0 及以上）
+    #   在 qBittorrent 的「设置 → WebUI → API Key」中点击生成，
+    #   把得到的 qbt_ 开头的字符串填到这里。
+    #   这是无状态认证：不需要登录、不会触发登录失败次数限制，
+    #   也不受 IP 封禁影响。填了它之后下面的用户名密码会被忽略。
+    api_key: ""
+    #
+    # 兼容：用户名密码（适用于 5.2.0 以下版本）
+    #   注意连续登录失败会触发 qBittorrent 的 IP 临时封禁。
+    username: "admin"
+    password: "adminadmin"
+
+    enabled: true
+    # 自签名 HTTPS 证书时设为 true
+    insecure_skip_verify: false
+    timeout: 10s
+
+  # ---- Transmission ----
+  # 注意：Transmission 不支持 API Key，只能用用户名密码（RPC 基本认证）。
+  - name: transmission
+    type: transmission
+    # 填根地址即可，程序会自动补上 /transmission/rpc
+    url: "http://192.168.1.10:9091"
+    # 若开启了 RPC 认证则填写
+    username: ""
+    password: ""
+    enabled: true
+    timeout: 10s
+
+# ---------------------------------------------------------------------------
+# 限速策略
+#
+# 每条策略独立求值。同一客户端可以被多条策略同时作用，
+# 此时以「后触发的那条」下发的限速值为准。
+#
+# 【重要】本文件是给用户复制修改的模板，其中的示例策略 enabled 为 true。
+# 但程序【首次启动自动生成】的 config.yaml 里，示例下载器与示例策略
+# 都是 enabled: false —— 因为策略一旦启用且用户没留意，会在流量达标后
+# 静默把上传限速下来，这类「悄悄改行为」最难排查。
+# 请确认阈值与限速值符合你的预期后再设为 true。
+# ---------------------------------------------------------------------------
+policies:
+  # --- 示例 1：每天上传超过 500 GiB 就限速到 1 MiB/s ---
+  - name: daily-500g
+    enabled: true
+    # 作用对象。["*"] 或省略表示全部客户端。
+    clients: ["*"]
+    # 统计周期长度
+    window: 24h
+    # 周期对齐方式：
+    #   day    自然日（每天 00:00 重置）——最符合「每日流量上限」的直觉
+    #   week   自然周（每周一 00:00 重置）
+    #   month  自然月（每月 1 日 00:00 重置）
+    #   hour   自然小时
+    #   rolling 滚动窗口（从程序启动起算，每 window 时间重置一次）
+    align: day
+
+    # 触发阈值：本周期内上传总量达到这个值就限速（必填）。
+    threshold_total: 500GiB
+
+    # 触发后下发的上传限速（字节/秒）。
+    limit_total: 1048576        # 1 MiB/s
+
+    # 进入新周期后是否自动解除限速
+    resume_on_window_reset: true
+
+    # --- 解除限速后要下发的速度（字节/秒）---
+    #
+    # 留空 / 省略：恢复到【触发前的原始限速】（通常是完全不限速）。
+    # 填 0      ：显式表示不限速。
+    # 填正值    ：恢复到该速度，例如 5MiB 表示 5 MiB/s。
+    #
+    # 典型用法：周期结束后不想立刻全速放开（怕又瞬间冲满额度），
+    # 而是先回到一个中间速度。
+    # resume_limit_total: 5MiB
+
+    # 触发后至少保持多久才允许解除，避免在阈值附近反复横跳
+    cooldown: 10m
+
+  # --- 示例 2：只作用于某个下载器 ---
+  # - name: qb-only
+  #   enabled: false
+  #   clients: ["qbittorrent"]
+  #   window: 24h
+  #   align: day
+  #   threshold_total: 200GiB
+  #   limit_total: 524288       # 512 KiB/s
+  #   resume_on_window_reset: true
+  #   cooldown: 0s
+
+  # --- 示例 3：每月 5 TB 的硬性总量 ---
+  # - name: monthly-5t
+  #   enabled: false
+  #   clients: ["*"]
+  #   window: 30d
+  #   align: month
+  #   threshold_total: 5TiB
+  #   limit_total: 262144       # 256 KiB/s
+  #   resume_on_window_reset: true
+  #   resume_limit_total: 5MiB  # 新周期先回到 5 MiB/s，避免立刻又冲满
+  #   cooldown: 0s
+
+# ---------------------------------------------------------------------------
+# 通知
+# ---------------------------------------------------------------------------
+notify:
+  enabled: false
+  # 需要推送的事件类型：speedup（触发限速）/ resume（解除限速）/ error（执行失败）
+  notify_on: ["speedup", "resume", "error"]
+
+  # --- ntfy 推送（公共服务器或自建均可）---
+  ntfy:
+    enabled: false
+    url: "https://ntfy.sh"      # 自建示例：http://192.168.1.10:8081
+    topic: "bt-traffic-guard"   # 手机端订阅同一个 topic 即可收到
+    token: ""                   # 自建服务开启鉴权时填写
+    priority: "default"         # min / low / default / high / urgent
+
+  # --- 通用 JSON Webhook ---
+  webhook:
+    enabled: false
+    url: "https://example.com/hook"
+    method: POST
+    # 格式：generic（默认，发送完整字段）/ discord / slack
+    format: generic
+    headers:
+      Authorization: "Bearer your-token"
+
+# ---------------------------------------------------------------------------
+# Web 面板认证
+# 也可以只设置 BTG_WEB_PASSWORD 环境变量来开启。
+# ---------------------------------------------------------------------------
+web_auth:
+  enabled: false
+  username: "admin"
+  password: "btguard"

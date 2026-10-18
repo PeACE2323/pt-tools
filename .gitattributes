@@ -1,0 +1,18 @@
+# 统一使用 LF 换行：Windows 上编辑后提交会被转为 CRLF，
+# 而 shell 脚本在 Linux 容器里带 CRLF 会报 "bad interpreter" 无法执行。
+* text=auto eol=lf
+
+# Shell 脚本必须是 LF，否则容器启动即失败
+*.sh text eol=lf
+docker/entrypoint.sh text eol=lf
+docker/install.sh text eol=lf
+
+# Windows 批处理保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff2 binary

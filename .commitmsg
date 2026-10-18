@@ -1,0 +1,39 @@
+feat: PTtools — 整合 CD2 守卫、115 监控与 BT 流量监控
+
+在 cd2-115-guard 基础上整合 bt-traffic-guard，项目更名为 PTtools。
+
+## 整合方式：Go 子进程 + 反向代理
+
+bt-traffic-guard 是独立的 Go 服务（自带 HTTP 服务与单页前端），
+与 Python 侧都用 /api/* 前缀。为了单容器单端口又不重写 Go 代码：
+
+    浏览器 -+-- /        -> PTtools 主 UI
+            +-- /api/*   -> FastAPI 后端
+            +-- /btg/*   -> 反代 -> 127.0.0.1:18080 (Go 子服务)
+
+关键设计：
+- Go 二进制只监听 127.0.0.1，禁止绕过 PTtools 直连
+- 重写 Go 前端里写死的 /api/ 绝对路径为 /btg/api/（覆盖双引号、
+  单引号、模板字符串三种形态，且幂等、不误伤正文）
+- 反代时剔除 hop-by-hop 头；重写响应体后去掉 content-length
+- 优雅关闭：先 SIGTERM 让 Go 侧恢复上传限速，超时才 kill
+  （否则下载器会永久停留在限速状态）
+- 自动重启 + 连续失败上限；看护任务每 30 秒探活
+- 二进制缺失时优雅降级：BT 页显示未安装，CD2/115 功能不受影响
+
+## Docker 多阶段构建
+
+Stage 1 golang:1.24-alpine 编译 bt-traffic-guard（静态链接，CGO_ENABLED=0）
+Stage 2 python:3.12-slim 运行时，仅拷贝编译产物
+
+## 其他
+
+- 前端新增「BT 流量」页签（iframe 嵌入 + 状态条 + 重启按钮）
+- 侧边栏品牌改为 PTtools，版本号 2.0.0
+- docker-compose 更名为 pttools，修正残留的 19799 端口说明
+- CI 增加 BT 整合验证：检查二进制存在、子服务运行、
+  /btg/ 反代返回 200 且路径已重写、/btg/api/status 透传正常
+- 新增 tests/test_btguard.py（15 个测试）覆盖路径重写、头部过滤、
+  缺失二进制的优雅降级
+
+测试：9 个套件 116 个测试全部通过

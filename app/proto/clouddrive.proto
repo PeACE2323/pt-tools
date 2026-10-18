@@ -1,0 +1,665 @@
+// ===========================================================================
+// clouddrive.proto  —  CloudDrive2 gRPC API
+// ---------------------------------------------------------------------------
+// 本文件为 CD2-115-Guard 内置的官方 proto 副本（取自上表官方地址）：
+//     https://www.clouddrive2.com/api/clouddrive.proto
+// 该文件会在 Docker 构建阶段由 tools/fetch_proto.py 优先用官方最新版覆盖，
+// 本内置副本保证离线构建可用。
+//
+// 关键约定（来自官方 gRPC API 开发者指南）：
+//   1. 除 GetSystemInfo / GetToken / Login / Register 等公开方法外，
+//      其余方法都要求 gRPC metadata：("authorization", "Bearer <token>")
+//   2. 传输任务管理集中在 CloudDriveFileSrv：
+//        GetUploadFileCount / GetUploadFileList
+//        CancelUploadFiles / PauseUploadFiles / ResumeUploadFiles
+//        CancelAllUploadFiles / PauseAllUploadFiles / ResumeAllUploadFiles
+//   3. GetUploadFileList 必须 getAll=true 才会返回全量任务列表，
+//      否则只会返回当前页（默认分页）。
+//
+// 注意：本副本只保留本项目（上传任务监控/重试）实际使用的方法签名，
+// 未使用的 RPC 在这里用注释块列出，避免生成体积过大的 stub；
+// 若官方 proto 被覆盖为完整版，pb2 仍然向后兼容（字段号一致）。
+// ===========================================================================
+
+syntax = "proto3";
+
+package clouddrive;
+
+option csharp_namespace = "CloudDriveSrv.Protos";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/descriptor.proto";
+
+// Define a custom option for versioning.
+extend google.protobuf.FileOptions { string version = 50001; }
+
+option (version) = "1.0.17";
+
+service CloudDriveFileSrv {
+  // -------------------------------------------------------------------------
+  // public methods, no authorization is required
+  // -------------------------------------------------------------------------
+  // returns if clouddrive has logged in to cloudfs server and the user name
+  rpc GetSystemInfo(google.protobuf.Empty) returns (CloudDriveSystemInfo) {}
+  // get bearer token by username and password
+  rpc GetToken(GetTokenRequest) returns (JWTToken) {}
+  // login to cloudfs server
+  rpc Login(UserLoginRequest) returns (FileOperationResult) {}
+  // get user created API token info by token string
+  rpc GetApiTokenInfo(StringValue) returns (TokenInfo) {}
+  // login with 2FA code (public method, no authorization required)
+  rpc LoginWith2FA(LoginWith2FARequest) returns (JWTToken) {}
+
+  // -------------------------------------------------------------------------
+  // authorized methods, Authorization: Bearer {token}
+  // -------------------------------------------------------------------------
+  // get account status
+  rpc GetAccountStatus(google.protobuf.Empty) returns (AccountStatusResult) {}
+  // get server runtime info
+  rpc GetRuntimeInfo(google.protobuf.Empty) returns (RuntimeInfo) {}
+  // get server stats, including cpu/mem/uptime
+  rpc GetRunningInfo(google.protobuf.Empty) returns (RunInfo) {}
+
+  // check if file exists / get single node info by full path
+  rpc FindFileByPath(FindFileByPathRequest) returns (CloudDriveFile) {}
+
+  // ---------------------- Transfer tasks management ------------------------
+  // get all transfer tasks' count
+  rpc GetAllTasksCount(google.protobuf.Empty) returns (GetAllTasksCountResult) {}
+  // get all download tasks
+  rpc GetDownloadFileList(google.protobuf.Empty) returns (GetDownloadFileListResult) {}
+  // get all upload tasks' count
+  rpc GetUploadFileCount(google.protobuf.Empty) returns (GetUploadFileCountResult) {}
+  // get upload tasks, paged by page number / items per page + file name filter
+  // NOTE: getAll=true 才返回全量任务
+  rpc GetUploadFileList(GetUploadFileListRequest) returns (GetUploadFileListResult) {}
+  // cancel all upload tasks
+  rpc CancelAllUploadFiles(google.protobuf.Empty) returns (google.protobuf.Empty) {}
+  // cancel selected upload tasks
+  rpc CancelUploadFiles(MultpleUploadFileKeyRequest) returns (google.protobuf.Empty) {}
+  // pause all upload tasks
+  rpc PauseAllUploadFiles(google.protobuf.Empty) returns (google.protobuf.Empty) {}
+  // pause selected upload tasks
+  rpc PauseUploadFiles(MultpleUploadFileKeyRequest) returns (google.protobuf.Empty) {}
+  // resume all upload tasks
+  rpc ResumeAllUploadFiles(google.protobuf.Empty) returns (google.protobuf.Empty) {}
+  // resume selected upload tasks
+  rpc ResumeUploadFiles(MultpleUploadFileKeyRequest) returns (google.protobuf.Empty) {}
+
+  // ---------------------------- Offline files ------------------------------
+  // add offline files by providing magnet, sha1, ... (applies to folders
+  // whose canOfflineDownload is true)
+  rpc AddOfflineFiles(AddOfflineFileRequest) returns (FileOperationResult) {}
+  // remove offline files by info hash
+  rpc RemoveOfflineFiles(RemoveOfflineFilesRequest) returns (FileOperationResult) {}
+  // list all offline files of a cloud with pagination
+  rpc ListAllOfflineFiles(OfflineFileListAllRequest) returns (OfflineFileListAllResult) {}
+  // get offline quota info of a cloud
+  rpc GetOfflineQuotaInfo(OfflineQuotaRequest) returns (OfflineQuotaInfo) {}
+  // clear offline downloads by filter type: All, Finished, Error, Downloading
+  rpc ClearOfflineFiles(ClearOfflineFileRequest) returns (google.protobuf.Empty) {}
+  // restart an offline download task by info hash, url and parent id
+  rpc RestartOfflineTask(RestartOfflineFileRequest) returns (google.protobuf.Empty) {}
+
+  // ------------------------------ Copy tasks -------------------------------
+  rpc GetCopyTasks(google.protobuf.Empty) returns (GetCopyTaskResult) {}
+  rpc CancelCopyTask(CopyTaskRequest) returns (google.protobuf.Empty) {}
+  rpc PauseCopyTask(PauseCopyTaskRequest) returns (google.protobuf.Empty) {}
+  rpc RestartCopyTask(CopyTaskRequest) returns (google.protobuf.Empty) {}
+  rpc RemoveCompletedCopyTasks(google.protobuf.Empty) returns (google.protobuf.Empty) {}
+  rpc RemoveAllCopyTasks(google.protobuf.Empty) returns (BatchOperationResult) {}
+  rpc RemoveCopyTasks(CopyTaskBatchRequest) returns (BatchOperationResult) {}
+  rpc PauseCopyTasks(PauseCopyTasksRequest) returns (BatchOperationResult) {}
+  rpc ResumeCopyTasks(CopyTaskBatchRequest) returns (BatchOperationResult) {}
+
+  // ----------------------------- Backup tasks ------------------------------
+  // 备份任务是本项目的上传来源（备份 → 目标云盘时会产生上传传输任务）。
+  // 因此“取消后重新上传”的正确做法是让备份重新走一遍 walkthrough。
+  // list all backups
+  rpc BackupGetAll(google.protobuf.Empty) returns (BackupList) {}
+  // get backup status by its source path
+  rpc BackupGetStatus(StringValue) returns (BackupStatus) {}
+  // add a backup
+  rpc BackupAdd(Backup) returns (google.protobuf.Empty) {}
+  // remove a backup by its source path
+  rpc BackupRemove(StringValue) returns (google.protobuf.Empty) {}
+  // update a backup
+  rpc BackupUpdate(Backup) returns (google.protobuf.Empty) {}
+  // add destinations to a backup
+  rpc BackupAddDestination(BackupModifyRequest) returns (google.protobuf.Empty) {}
+  // remove destinations from a backup
+  rpc BackupRemoveDestination(BackupModifyRequest) returns (google.protobuf.Empty) {}
+  // enable/disable a backup
+  rpc BackupSetEnabled(BackupSetEnabledRequest) returns (google.protobuf.Empty) {}
+  // enable/disable a backup's file system watch
+  rpc BackupSetFileSystemWatchEnabled(BackupModifyRequest) returns (google.protobuf.Empty) {}
+  // restart a backup walking through（触发备份重新扫描源目录，从而重新上传）
+  rpc BackupRestartWalkingThrough(StringValue) returns (google.protobuf.Empty) {}
+
+  // --------------------------- Realtime push -------------------------------
+  // push upload/download task count changes to client
+  rpc PushTaskChange(google.protobuf.Empty) returns (stream GetAllTasksCountResult) {}
+  // general message notification
+  rpc PushMessage(google.protobuf.Empty) returns (stream CloudDrivePushMessage) {}
+}
+
+// ===========================================================================
+// Authentication messages
+// ===========================================================================
+message GetTokenRequest {
+  string userName = 1;
+  string password = 2;
+  optional string totpCode = 3; // Optional TOTP code for 2FA-enabled accounts
+}
+
+message JWTToken {
+  bool success = 1;
+  string errorMessage = 2;
+  string token = 3;
+  google.protobuf.Timestamp expiration = 4;
+}
+
+message UserLoginRequest {
+  string userName = 1;
+  string password = 2;
+  bool synDataToCloud = 3;
+}
+
+message LoginWith2FARequest {
+  string userName = 1;
+  string password = 2;
+  string totpCode = 3;
+}
+
+message TokenInfo {
+  string token = 1;
+  string userName = 2;
+  optional google.protobuf.Timestamp createTime = 3;
+  optional google.protobuf.Timestamp expiration = 4;
+  optional bool isRevoked = 5;
+}
+
+message StringValue { string value = 1; }
+message BoolResult { bool result = 1; }
+message StringResult { string result = 1; }
+
+message CloudDriveSystemInfo {
+  bool IsLogin = 1;
+  string UserName = 2;
+  bool SystemReady = 3;
+  optional string SystemMessage = 4;
+  optional bool hasError = 5;
+}
+
+message AccountStatusResult {
+  string userName = 1;
+  string emailConfirmed = 2;
+  double accountBalance = 3;
+  AccountPlan accountPlan = 4;
+  repeated AccountRole accountRoles = 5;
+  optional AccountPlan secondPlan = 6;
+  optional string partnerReferralCode = 7;
+  optional bool trustedDevice = 8;
+  optional bool userNameIsDeviceId = 9;
+}
+
+message AccountPlan {
+  string planName = 1;
+  string description = 2;
+  string fontAwesomeIcon = 3;
+  string durationDescription = 4;
+  google.protobuf.Timestamp endTime = 5;
+}
+
+message AccountRole {
+  string roleName = 1;
+  string description = 2;
+  optional int32 value = 3;
+}
+
+message RuntimeInfo {
+  string productName = 1;
+  string productVersion = 2;
+  string CloudAPIVersion = 3;
+  string osInfo = 4;
+}
+
+message RunInfo {
+  double cpuUsage = 1;
+  uint64 memUsageKB = 2;
+  double uptime = 3;
+  uint64 fhTableCount = 4;
+  uint64 dirCacheCount = 5;
+  uint64 tempFileCount = 6;
+  uint64 dbDirCacheCount = 7;
+  double downloadBytesPerSecond = 8;
+  double uploadBytesPerSecond = 9;
+  uint64 totalMemoryKB = 10;
+}
+
+// ===========================================================================
+// Common result messages
+// ===========================================================================
+message FileOperationResult {
+  bool success = 1;
+  string errorMessage = 2;
+  repeated string resultFilePaths = 3;
+}
+
+message BatchOperationResult {
+  bool success = 1;
+  uint32 affectedCount = 2;
+  string errorMessage = 3;
+}
+
+message FileRequest {
+  string path = 1;
+  optional bool forceRefresh = 2; // if true, will force refresh the file info
+}
+
+message MultiFileRequest { repeated string path = 1; }
+
+message FindFileByPathRequest {
+  string parentPath = 1;
+  string path = 2;
+}
+
+// ===========================================================================
+// File node message (only the fields we read are kept meaningful)
+// ===========================================================================
+message CloudDriveFile {
+  string id = 1;
+  string name = 2;
+  string fullPathName = 3;
+  int64 size = 4;
+  enum FileType {
+    Directory = 0;
+    File = 1;
+    Other = 2;
+  }
+  FileType fileType = 5;
+  google.protobuf.Timestamp createTime = 6;
+  google.protobuf.Timestamp writeTime = 7;
+  google.protobuf.Timestamp accessTime = 8;
+  CloudAPI CloudAPI = 9;
+  string thumbnailUrl = 10;
+  string previewUrl = 11;
+  string originalPath = 14;
+
+  bool isDirectory = 30;
+  bool isRoot = 31;
+  bool isCloudRoot = 32;
+  bool isCloudDirectory = 33;
+  bool isCloudFile = 34;
+  bool isSearchResult = 35;
+  bool isForbidden = 36;
+  bool isLocal = 37;
+
+  bool canOfflineDownload = 66;
+  bool canAddShareLink = 67;
+  bool supportOfflineDownloadManagement = 75;
+
+  enum HashType {
+    Unknown = 0;
+    Md5 = 1;
+    Sha1 = 2;
+    PikPakSha1 = 3;
+  }
+  map<uint32, string> fileHashes = 70;
+}
+
+message CloudAPI {
+  string name = 1;
+  string userName = 2;
+  string nickName = 3;
+  bool isLocked = 4;
+  bool supportMultiThreadUploading = 5;
+  bool supportQpsLimit = 6;
+  bool isCloudEventListenerRunning = 7;
+  bool hasPromotions = 8;
+  optional string promotionTitle = 9;
+  optional string path = 10;
+}
+
+// ===========================================================================
+// Transfer task messages  (上传/下载任务)
+// ===========================================================================
+message GetDownloadFileCountResult { uint32 fileCount = 1; }
+
+message DownloadFileInfo {
+  string filePath = 1;
+  uint64 fileLength = 2;
+  uint64 totalBufferUsed = 3;
+  uint32 downloadThreadCount = 4;
+  repeated string process = 5;
+  string detailDownloadInfo = 6;
+  optional string lastDownloadError = 7;
+  double bytesPerSecond = 8;
+}
+
+message GetDownloadFileListResult {
+  double globalBytesPerSecond = 1;
+  repeated DownloadFileInfo downloadFiles = 4;
+}
+
+message GetUploadFileCountResult { uint32 fileCount = 1; }
+
+message UploadFileInfo {
+  enum Status {
+    WaitforPreprocessing = 0;
+    Preprocessing = 1;
+    Cancelled = 2;
+    Transfer = 3;
+    Pause = 4;
+    Finish = 5;
+    Skipped = 6;
+    Inqueue = 7;
+    Ignored = 8;
+    Error = 9;
+    FatalError = 10;
+  }
+  enum OperatorType {
+    Mount = 0;        // uploaded by mounted file system operations
+    Copy = 1;         // uploaded by a copy task
+    BackupFile = 2;   // uploaded by a backup task
+    RemoteUpload = 3; // uploaded by a remote upload task
+  }
+  string key = 1;   // 任务唯一 key，用于 Pause/Cancel/Resume
+  string destPath = 2;
+  uint64 size = 3;
+  uint64 transferedBytes = 4;
+  string status = 5;      // 人类可读状态文本
+  string errorMessage = 6;
+  OperatorType operatorType = 7;
+  Status statusEnum = 8;
+}
+
+message GetUploadFileListRequest {
+  bool getAll = 1;
+  uint32 itemsPerPage = 2;
+  uint32 pageNumber = 3;
+  string filter = 4;
+  optional UploadFileInfo.Status statusFilter = 5;
+  optional UploadFileInfo.OperatorType operatorTypeFilter = 6;
+}
+
+message GetUploadFileListResult {
+  uint32 totalCount = 1;
+  repeated UploadFileInfo uploadFiles = 2;
+  double globalBytesPerSecond = 3;
+  uint64 totalBytes = 4;
+  uint64 finishedBytes = 5;
+  uint32 totalCountFiltered = 6;
+}
+
+message GetAllTasksCountResult {
+  uint32 downloadCount = 1;
+  uint32 uploadCount = 2;
+  uint32 copyTaskCount = 6;
+  PushMessage pushMessage = 3;
+  bool hasUpdate = 4;
+  // upload file status changed
+  repeated UploadFileInfo uploadFileStatusChanges = 5;
+}
+
+message PushMessage { string clouddriveVersion = 1; }
+
+// 批量操作上传任务时使用的 key 列表（注意官方拼写为 Multple）
+message MultpleUploadFileKeyRequest { repeated string keys = 1; }
+
+// ===========================================================================
+// Offline (云下载) messages
+// ===========================================================================
+message AddOfflineFileRequest {
+  string urls = 1;
+  string toFolder = 2;
+  // auto check destination folder after these seconds to see if files are
+  // available, 0 means no check
+  optional uint64 checkFolderAfterSecs = 3;
+}
+
+message RemoveOfflineFilesRequest {
+  string cloudName = 1;
+  string cloudAccountId = 2;
+  bool deleteFiles = 3;
+  repeated string infoHashes = 4;
+  optional string path = 5;
+}
+
+message OfflineFileListAllRequest {
+  string path = 1;
+  uint32 page = 2;
+}
+
+message OfflineFileListAllResult {
+  repeated CloudDriveFile files = 1;
+  uint32 pageCount = 2;
+}
+
+message OfflineQuotaRequest {
+  string cloudName = 1;
+  string cloudAccountId = 2;
+  optional string path = 3;
+}
+
+message OfflineQuotaInfo {
+  int64 totalQuota = 1;
+  int64 usedQuota = 2;
+}
+
+message ClearOfflineFileRequest {
+  enum FilterType {
+    All = 0;
+    Finished = 1;
+    Error = 2;
+    Downloading = 3;
+  }
+  string path = 1;
+  repeated FilterType filterTypes = 2;
+}
+
+message RestartOfflineFileRequest {
+  string infoHash = 1;
+  string url = 2;
+  string parentId = 3;
+}
+
+// ===========================================================================
+// Copy task messages
+// ===========================================================================
+message TaskError {
+  google.protobuf.Timestamp time = 1;
+  string message = 2;
+}
+
+message CopyTaskRequest {
+  string sourcePath = 1;
+  string destPath = 2;
+}
+
+message PauseCopyTaskRequest {
+  string sourcePath = 1;
+  string destPath = 2;
+  bool pause = 3;
+}
+
+message CopyTaskBatchRequest { repeated string taskKeys = 1; }
+
+message PauseCopyTasksRequest {
+  repeated string taskKeys = 1;
+  bool pause = 2;
+}
+
+message CopyTask {
+  enum TaskMode {
+    Copy = 0;
+    Move = 1;
+  }
+  enum TaskStatus {
+    Pending = 0;
+    Scanning = 1;
+    Scanned = 2;
+    Completed = 3;
+    Failed = 4;
+  }
+  TaskMode taskMode = 2;
+  string sourcePath = 3;
+  string destPath = 4;
+  TaskStatus status = 5;
+  uint64 totalFolders = 6;
+  uint64 totalFiles = 7;
+  uint64 failedFolders = 8;
+  uint64 failedFiles = 9;
+  uint64 uploadedFiles = 10;
+  uint64 cancelledFiles = 11;
+  uint64 skippedFiles = 16;
+  uint64 totalBytes = 12;
+  uint64 uploadedBytes = 13;
+  bool paused = 14;
+  repeated TaskError errors = 15;
+  google.protobuf.Timestamp startTime = 17;
+  optional google.protobuf.Timestamp endTime = 18;
+}
+
+message GetCopyTaskResult { repeated CopyTask copyTasks = 1; }
+
+// ===========================================================================
+// Backup (备份任务) messages
+// ---------------------------------------------------------------------------
+// 备份 = “源目录 → 一个或多个目标目录”的同步任务。当目标是云盘目录时，
+// 备份过程中会产生上传传输任务 —— 这正是本项目的监控对象。
+//
+// 关键用法（重试闭环）：
+//   备份任务被取消上传后，调用 BackupRestartWalkingThrough(源路径)
+//   让备份重新扫描源目录，缺失的文件会被重新上传。
+// ===========================================================================
+message BackupDestination {
+  string destinationPath = 1;
+  bool isEnabled = 2;
+}
+
+message FileBackupRule {
+  // 逗号分隔的扩展名列表，例如 "jpg,png,mkv"
+  string extensions = 1;
+  // 以下为 proto 编号 100-103 的隐藏开关字段：
+  // 只设置 extensions 而不设 isEnabled=true，规则会静默失效。
+  optional bool isEnabled = 100;
+  // false = 白名单（只备份这些扩展名），true = 黑名单（跳过这些扩展名）
+  optional bool isBlackList = 101;
+  optional bool applyToFolder = 102;
+  optional bool applyToFile = 103;
+}
+
+enum FileReplaceRule {
+  Replace_Skip = 0;
+  Replace_Overwrite = 1;
+  Replace_KeepHistoryVersion = 2;
+}
+
+enum FileDeleteRule {
+  Delete_Delete = 0;
+  Delete_Recycle = 1;
+  Delete_Keep = 2;
+  Delete_MoveToVersionHistory = 3;
+}
+
+enum FileCompletionRule {
+  Completion_None = 0;
+  Completion_DeleteSource = 1;
+  Completion_DeleteSourceAndEmptyFolder = 2;
+}
+
+message Backup {
+  string sourcePath = 1;
+  repeated BackupDestination destinations = 2;
+  repeated FileBackupRule fileBackupRules = 3;
+  FileReplaceRule fileReplaceRule = 4;
+  FileDeleteRule fileDeleteRule = 5;
+  FileCompletionRule fileCompletionRule = 6;
+  bool isEnabled = 7;
+  bool fileSystemWatchEnabled = 8;
+  bool syncDeleteFromDest = 9;
+  bool dontStartScanAfterAdd = 10;
+}
+
+message BackupList { repeated Backup backups = 1; }
+
+message BackupStatus {
+  enum Status {
+    Idle = 0;
+    WalkingThrough = 1;  // 正在扫描源目录
+    Error = 2;
+    Disabled = 3;
+    Scanned = 4;
+    Finished = 5;
+    Waiting = 6;
+  }
+  string sourcePath = 1;
+  Status status = 2;
+  uint64 totalFiles = 3;
+  uint64 processedFiles = 4;
+  uint64 failedFiles = 5;
+  string errorMessage = 6;
+}
+
+message BackupModifyRequest {
+  string sourcePath = 1;
+  // 用于 AddDestination / RemoveDestination
+  BackupDestination destination = 2;
+  // 用于 BackupSetFileSystemWatchEnabled
+  optional bool enabled = 3;
+}
+
+message BackupSetEnabledRequest {
+  string sourcePath = 1;
+  bool isEnabled = 2;
+}
+
+// ===========================================================================
+// Push message envelope
+// ===========================================================================
+message TransferTaskStatus {
+  uint32 downloadCount = 1;
+  uint32 uploadCount = 2;
+  string clouddriveVersion = 3;
+  repeated UploadFileInfo uploadFileStatusChanges = 4;
+  bool hasUpdate = 5;
+  uint32 copyTaskCount = 6;
+}
+
+message CloudDrivePushMessage {
+  enum MessageType {
+    DOWNLOADER_COUNT = 0;
+    UPLOADER_COUNT = 1;
+    UPDATE_STATUS = 2;
+    FORCE_EXIT = 3;
+    FILE_SYSTEM_CHANGE = 4;
+    MOUNT_POINT_CHANGE = 5;
+    COPY_TASK_COUNT = 6;
+    LOG_MESSAGE = 7;
+    MERGE_TASKS = 8;
+  }
+  MessageType messageType = 1;
+  oneof data {
+    TransferTaskStatus transferTaskStatus = 2;
+    UpdateStatus updateStatus = 3;
+  }
+}
+
+message UpdateStatus {
+  enum UpdatePhase {
+    NO_UPDATE = 0;
+    DOWNLOADING = 1;
+    READY_TO_UPDATE = 2;
+    UPDATING = 3;
+    UPDATE_SUCCESS = 4;
+    UPDATE_FAILED = 5;
+  }
+  UpdatePhase updatePhase = 1;
+  optional string newVersion = 2;
+  optional string message = 3;
+  string clouddriveVersion = 4;
+  optional uint64 downloadedBytes = 5;
+  optional uint64 totalBytes = 6;
+}
