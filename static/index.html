@@ -95,84 +95,225 @@
 
       <!-- ============ 仪表盘 ============ -->
       <div v-if="tab==='dashboard'" class="space-y-5">
-        <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
-          <div v-for="c in dashboardCards" :key="c.label"
-               class="bg-white rounded-lg border border-slate-200 p-4">
-            <div class="text-xs text-slate-500 mb-1">{{ c.label }}</div>
-            <div :class="['text-2xl font-semibold', c.color || 'text-slate-800']">{{ c.value }}</div>
-            <div class="text-[11px] text-slate-400 mt-1">{{ c.hint }}</div>
+
+        <!-- 一、服务状态：一行扫完，异常才展开细节 -->
+        <div class="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">
+          <div v-for="s in serviceCards" :key="s.key"
+               @click="switchTab(s.goto)"
+               :class="['bg-white rounded-xl border p-4 cursor-pointer transition hover:shadow-sm',
+                 s.ok ? 'border-slate-200' : 'border-rose-200 bg-rose-50/30']">
+            <div class="flex items-center gap-2 mb-2">
+              <span :class="['w-2.5 h-2.5 rounded-full shrink-0',
+                s.ok ? 'bg-emerald-500' : (s.warn ? 'bg-amber-500' : 'bg-rose-500')]"></span>
+              <span class="text-sm font-medium">{{ s.title }}</span>
+              <div class="flex-1"></div>
+              <span :class="['text-[11px] px-1.5 py-0.5 rounded',
+                s.ok ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700']">
+                {{ s.statusText }}
+              </span>
+            </div>
+            <div class="text-xs text-slate-500 truncate" :title="s.detail">{{ s.detail }}</div>
+            <div v-if="s.sub" class="text-[11px] text-slate-400 mt-1 truncate">{{ s.sub }}</div>
           </div>
         </div>
 
-        <div class="grid lg:grid-cols-2 gap-5">
-          <!-- CD2 状态 -->
-          <div class="bg-white rounded-lg border border-slate-200 p-5">
-            <h3 class="font-medium mb-3 flex items-center gap-2">
-              <span :class="['w-2 h-2 rounded-full', dash.cd2.connected?'bg-emerald-500':'bg-rose-500']"></span>
-              CloudDrive2 连接状态
-            </h3>
-            <dl class="text-sm space-y-2">
-              <div class="flex justify-between"><dt class="text-slate-500">gRPC 地址</dt>
-                <dd class="mono">{{ dash.cd2.host || '未配置' }}</dd></div>
-              <div class="flex justify-between"><dt class="text-slate-500">gRPC 连通</dt>
-                <dd :class="dash.cd2.connected?'text-emerald-600':'text-rose-600'">{{ dash.cd2.connected?'正常':'失败' }}</dd></div>
-              <div class="flex justify-between"><dt class="text-slate-500">Token 鉴权</dt>
-                <dd :class="dash.cd2.authenticated?'text-emerald-600':'text-amber-600'">{{ dash.cd2.authenticated?'有效':'未验证/无效' }}</dd></div>
-              <div class="flex justify-between"><dt class="text-slate-500">CD2 用户</dt>
-                <dd>{{ dash.cd2.user_name || '—' }}</dd></div>
-              <div class="flex justify-between"><dt class="text-slate-500">上传队列</dt>
-                <dd>{{ dash.cd2.upload_count }} 个</dd></div>
-              <div class="flex justify-between"><dt class="text-slate-500">最近轮询</dt>
-                <dd class="mono text-xs">{{ fmtAgo(dash.cd2.last_poll_at) }}</dd></div>
-            </dl>
-            <div v-if="dash.cd2.last_poll_error" class="mt-3 text-xs text-rose-600 bg-rose-50 rounded p-2 break-all">
-              {{ dash.cd2.last_poll_error }}
+        <!-- 二、核心指标：按业务分组，每组语义清晰 -->
+        <div class="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+          <!-- CD2 秒传守卫 -->
+          <div class="bg-white rounded-xl border border-slate-200 p-5">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="font-medium text-sm">CD2 秒传守卫</h3>
+              <button @click="switchTab('tasks')" class="text-[11px] text-sky-600 hover:underline">详情 →</button>
             </div>
-            <div class="mt-3 flex gap-2">
-              <button @click="switchTab('settings')" class="text-xs text-sky-600 hover:underline">去设置</button>
-              <button @click="switchTab('logs')" class="text-xs text-sky-600 hover:underline">查看日志</button>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <div class="text-2xl font-semibold text-emerald-600">{{ dash.stats.today_instant ?? 0 }}</div>
+                <div class="text-[11px] text-slate-400 mt-0.5">今日秒传</div>
+              </div>
+              <div>
+                <div class="text-2xl font-semibold text-slate-700">{{ dash.stats.total_instant ?? 0 }}</div>
+                <div class="text-[11px] text-slate-400 mt-0.5">累计秒传</div>
+              </div>
+              <div>
+                <div class="text-2xl font-semibold text-sky-600">{{ dash.stats.live_uploads ?? 0 }}</div>
+                <div class="text-[11px] text-slate-400 mt-0.5">上传中</div>
+              </div>
+              <div>
+                <div :class="['text-2xl font-semibold',
+                  ((dash.stats.waiting_retry ?? 0) + (dash.stats.retrying ?? 0)) > 0
+                    ? 'text-amber-600' : 'text-slate-700']">
+                  {{ (dash.stats.waiting_retry ?? 0) + (dash.stats.retrying ?? 0) }}
+                </div>
+                <div class="text-[11px] text-slate-400 mt-0.5">等待重试</div>
+              </div>
+            </div>
+            <div class="mt-3 pt-3 border-t border-slate-100 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
+              <span>启用规则 <b class="text-slate-700">{{ dash.stats.enabled_rules ?? 0 }}</b>/{{ dash.stats.total_rules ?? 0 }}</span>
+              <span>重试成功 <b class="text-emerald-600">{{ dash.stats.retry_success ?? 0 }}</b></span>
+              <span>最终失败 <b class="text-rose-600">{{ dash.stats.retry_failed ?? 0 }}</b></span>
             </div>
           </div>
 
-          <!-- 115 状态 -->
-          <div class="bg-white rounded-lg border border-slate-200 p-5">
-            <h3 class="font-medium mb-3 flex items-center gap-2">
-              <span :class="['w-2 h-2 rounded-full', dash.p115.logged_in?'bg-emerald-500':'bg-rose-500']"></span>
-              115 账号状态
-            </h3>
-            <dl class="text-sm space-y-2">
-              <div class="flex justify-between"><dt class="text-slate-500">Cookie</dt>
-                <dd :class="dash.p115.configured?'text-emerald-600':'text-rose-600'">{{ dash.p115.configured?'已配置':'未配置' }}</dd></div>
-              <div class="flex justify-between"><dt class="text-slate-500">登录状态</dt>
-                <dd :class="dash.p115.logged_in?'text-emerald-600':'text-amber-600'">{{ dash.p115.logged_in?'有效':'无效/未验证' }}</dd></div>
-              <div class="flex justify-between"><dt class="text-slate-500">UID</dt>
-                <dd class="mono">{{ dash.p115.user_id || '—' }}</dd></div>
-              <div class="flex justify-between"><dt class="text-slate-500">云下载任务</dt>
-                <dd>{{ dash.p115.task_count }} 个</dd></div>
-              <div class="flex justify-between"><dt class="text-slate-500">最近轮询</dt>
-                <dd class="mono text-xs">{{ fmtAgo(dash.p115.last_poll_at) }}</dd></div>
-            </dl>
-            <div v-if="dash.p115.last_poll_error" class="mt-3 text-xs text-rose-600 bg-rose-50 rounded p-2 break-all">
-              {{ dash.p115.last_poll_error }}
+          <!-- 115 云下载 -->
+          <div class="bg-white rounded-xl border border-slate-200 p-5">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="font-medium text-sm">115 云下载</h3>
+              <button @click="switchTab('p115')" class="text-[11px] text-sky-600 hover:underline">详情 →</button>
             </div>
-            <div class="mt-3 flex gap-2">
-              <button @click="switchTab('settings')" class="text-xs text-sky-600 hover:underline">去设置</button>
-              <button @click="switchTab('logs')" class="text-xs text-sky-600 hover:underline">查看日志</button>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <div class="text-2xl font-semibold text-sky-600">{{ dash.p115.task_count ?? 0 }}</div>
+                <div class="text-[11px] text-slate-400 mt-0.5">任务总数</div>
+              </div>
+              <div>
+                <div class="text-2xl font-semibold text-slate-700">{{ dash.stats.offline_active ?? 0 }}</div>
+                <div class="text-[11px] text-slate-400 mt-0.5">进行中</div>
+              </div>
+              <div>
+                <div class="text-2xl font-semibold text-amber-600">{{ dash.stats.today_cancelled_offline ?? 0 }}</div>
+                <div class="text-[11px] text-slate-400 mt-0.5">今日超时取消</div>
+              </div>
+              <div>
+                <div class="text-2xl font-semibold text-slate-700">{{ dash.stats.total_cancelled_offline ?? 0 }}</div>
+                <div class="text-[11px] text-slate-400 mt-0.5">累计取消</div>
+              </div>
+            </div>
+            <div class="mt-3 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
+              最近轮询 <b class="text-slate-700">{{ fmtAgo(dash.p115.last_poll_at) }}</b>
+            </div>
+          </div>
+
+          <!-- PT 流量 -->
+          <div class="bg-white rounded-xl border border-slate-200 p-5">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="font-medium text-sm">PT 流量</h3>
+              <button @click="switchTab('pt')" class="text-[11px] text-sky-600 hover:underline">详情 →</button>
+            </div>
+            <template v-if="dash.pt && dash.pt.running">
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <div class="text-2xl font-semibold text-emerald-600">{{ fmtSpeed(dash.pt.up_speed) }}</div>
+                  <div class="text-[11px] text-slate-400 mt-0.5">上传速度</div>
+                </div>
+                <div>
+                  <div class="text-2xl font-semibold text-sky-600">{{ fmtSize(dash.pt.window_bytes) }}</div>
+                  <div class="text-[11px] text-slate-400 mt-0.5">本周期流量</div>
+                </div>
+                <div>
+                  <div class="text-2xl font-semibold text-slate-700">
+                    {{ dash.pt.client_online ?? 0 }}<span class="text-sm text-slate-400">/{{ dash.pt.client_count ?? 0 }}</span>
+                  </div>
+                  <div class="text-[11px] text-slate-400 mt-0.5">下载器在线</div>
+                </div>
+                <div>
+                  <div :class="['text-2xl font-semibold',
+                    (dash.pt.policy_limited ?? 0) > 0 ? 'text-rose-600' : 'text-slate-700']">
+                    {{ dash.pt.policy_limited ?? 0 }}<span class="text-sm text-slate-400">/{{ dash.pt.policy_count ?? 0 }}</span>
+                  </div>
+                  <div class="text-[11px] text-slate-400 mt-0.5">限速中策略</div>
+                </div>
+              </div>
+              <div class="mt-3 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
+                做种 <b class="text-slate-700">{{ dash.pt.torrents ?? 0 }}</b>
+                · 连接 <b class="text-slate-700">{{ dash.pt.peers ?? 0 }}</b>
+              </div>
+            </template>
+            <div v-else class="text-center py-6">
+              <div class="text-sm text-slate-400 mb-2">
+                {{ dash.pt?.available ? '子服务未运行' : '尚未启用' }}
+              </div>
+              <button @click="switchTab('settings')"
+                class="text-xs text-sky-600 hover:underline">去配置 →</button>
             </div>
           </div>
         </div>
 
-        <!-- 调度任务 -->
-        <div class="bg-white rounded-lg border border-slate-200 p-5">
-          <h3 class="font-medium mb-3">后台调度任务</h3>
-          <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            <div v-for="j in dash.scheduler.jobs" :key="j.id"
-                 class="border border-slate-200 rounded p-3">
-              <div class="text-sm font-medium">{{ j.name }}</div>
-              <div class="text-[11px] text-slate-500 mono">{{ j.id }}</div>
-              <div class="text-[11px] text-emerald-600 mt-1">下次 {{ fmtAgo(j.next_run_at) }}</div>
+        <!-- 三、异常提示：仅在有错误时出现，平时不占版面 -->
+        <div v-if="dashboardErrors.length" class="bg-white rounded-xl border border-slate-200 p-5">
+          <h3 class="font-medium text-sm mb-3 flex items-center gap-2">
+            需要注意
+            <span class="text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">
+              {{ dashboardErrors.length }}
+            </span>
+          </h3>
+          <div class="space-y-2">
+            <div v-for="(e, i) in dashboardErrors" :key="i"
+                 class="flex items-start gap-2 text-xs bg-rose-50 text-rose-700 rounded p-2">
+              <span class="shrink-0 font-medium">{{ e.source }}</span>
+              <span class="break-all flex-1">{{ e.message }}</span>
+              <button @click="switchTab(e.goto)" class="shrink-0 text-sky-600 hover:underline">处理 →</button>
             </div>
-            <div v-if="!dash.scheduler.jobs.length" class="text-sm text-slate-400">调度器未运行</div>
+          </div>
+        </div>
+
+        <!-- 四、运行信息：折叠起来，需要时再看 -->
+        <div class="bg-white rounded-xl border border-slate-200">
+          <button @click="dashDetailOpen = !dashDetailOpen"
+            class="w-full px-5 py-3 flex items-center gap-2 text-sm font-medium text-slate-600 hover:bg-slate-50 rounded-xl">
+            <span class="text-slate-400">{{ dashDetailOpen ? '▾' : '▸' }}</span>
+            运行详情
+            <span class="text-[11px] font-normal text-slate-400">
+              连接参数 · 调度任务 · 轮询状态
+            </span>
+          </button>
+          <div v-if="dashDetailOpen" class="px-5 pb-5 space-y-5">
+            <div class="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+              <div>
+                <h4 class="text-xs font-medium text-slate-500 mb-2">CloudDrive2</h4>
+                <dl class="text-xs space-y-1.5">
+                  <div class="flex justify-between gap-3"><dt class="text-slate-400">地址</dt>
+                    <dd class="mono truncate" :title="dash.cd2.host">{{ dash.cd2.host || '未配置' }}</dd></div>
+                  <div class="flex justify-between"><dt class="text-slate-400">Token</dt>
+                    <dd :class="dash.cd2.authenticated?'text-emerald-600':'text-amber-600'">
+                      {{ dash.cd2.authenticated?'有效':'未验证' }}</dd></div>
+                  <div class="flex justify-between"><dt class="text-slate-400">用户</dt>
+                    <dd class="truncate">{{ dash.cd2.user_name || '—' }}</dd></div>
+                  <div class="flex justify-between"><dt class="text-slate-400">最近轮询</dt>
+                    <dd class="mono">{{ fmtAgo(dash.cd2.last_poll_at) }}</dd></div>
+                </dl>
+              </div>
+              <div>
+                <h4 class="text-xs font-medium text-slate-500 mb-2">115 账号</h4>
+                <dl class="text-xs space-y-1.5">
+                  <div class="flex justify-between"><dt class="text-slate-400">Cookie</dt>
+                    <dd :class="dash.p115.configured?'text-emerald-600':'text-rose-600'">
+                      {{ dash.p115.configured?'已配置':'未配置' }}</dd></div>
+                  <div class="flex justify-between"><dt class="text-slate-400">登录</dt>
+                    <dd :class="dash.p115.logged_in?'text-emerald-600':'text-amber-600'">
+                      {{ dash.p115.logged_in?'有效':'未验证' }}</dd></div>
+                  <div class="flex justify-between"><dt class="text-slate-400">UID</dt>
+                    <dd class="mono">{{ dash.p115.user_id || '—' }}</dd></div>
+                  <div class="flex justify-between"><dt class="text-slate-400">最近轮询</dt>
+                    <dd class="mono">{{ fmtAgo(dash.p115.last_poll_at) }}</dd></div>
+                </dl>
+              </div>
+              <div>
+                <h4 class="text-xs font-medium text-slate-500 mb-2">PT 流量</h4>
+                <dl class="text-xs space-y-1.5">
+                  <div class="flex justify-between"><dt class="text-slate-400">状态</dt>
+                    <dd :class="dash.pt?.running?'text-emerald-600':'text-slate-400'">
+                      {{ dash.pt?.running ? '运行中' : '未运行' }}</dd></div>
+                  <div class="flex justify-between"><dt class="text-slate-400">版本</dt>
+                    <dd class="mono">{{ dash.pt?.version || '—' }}</dd></div>
+                  <div class="flex justify-between"><dt class="text-slate-400">运行时长</dt>
+                    <dd class="mono">{{ dash.pt?.uptime || '—' }}</dd></div>
+                  <div class="flex justify-between"><dt class="text-slate-400">下载速度</dt>
+                    <dd class="mono">{{ fmtSpeed(dash.pt?.dl_speed) }}</dd></div>
+                </dl>
+              </div>
+            </div>
+
+            <div>
+              <h4 class="text-xs font-medium text-slate-500 mb-2">后台调度</h4>
+              <div class="grid sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5 gap-2">
+                <div v-for="j in dash.scheduler.jobs" :key="j.id"
+                     class="border border-slate-200 rounded px-3 py-2">
+                  <div class="text-xs font-medium truncate">{{ j.name }}</div>
+                  <div class="text-[10px] text-emerald-600 mt-0.5">{{ fmtAgo(j.next_run_at) }}</div>
+                </div>
+                <div v-if="!dash.scheduler.jobs.length" class="text-xs text-slate-400">调度器未运行</div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -675,9 +816,94 @@
               </div>
             </div>
             <div v-else class="text-sm text-slate-400 py-4">
-              还没有配置任何限速策略。请到
-              <button @click="switchTab('settings')" class="text-sky-600 hover:underline">系统设置 → PT 流量</button>
-              里添加下载器与策略。
+              还没有配置任何限速策略。用下方「添加策略」创建一条。
+            </div>
+
+            <!-- 策略编辑 -->
+            <div class="mt-4 pt-4 border-t border-slate-100 space-y-3">
+              <div v-for="(p, i) in ptPolicies" :key="i"
+                   class="border border-slate-200 rounded-lg p-3 space-y-3 bg-slate-50/40">
+                <div class="flex items-center gap-2">
+                  <span class="text-xs text-slate-400 mono w-5">{{ i + 1 }}</span>
+                  <input v-model="p.name" placeholder="策略名称（如 每日 500G）"
+                    class="px-2 py-1 border border-slate-300 rounded text-sm w-48 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                  <label class="flex items-center gap-1 text-xs text-slate-600">
+                    <input type="checkbox" v-model="p.enabled" class="rounded"> 启用
+                  </label>
+                  <div class="flex-1"></div>
+                  <button @click="ptRemovePolicy(i)" type="button"
+                    class="text-rose-600 hover:bg-rose-50 px-2 py-1 rounded text-xs">删除</button>
+                </div>
+
+                <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <div>
+                    <label class="block text-xs text-slate-500 mb-1">统计周期</label>
+                    <select v-model="p.window"
+                      class="w-full px-2 py-1 border border-slate-300 rounded text-sm bg-white">
+                      <option value="1h">每小时</option>
+                      <option value="24h">每天</option>
+                      <option value="7d">每周</option>
+                      <option value="30d">每月</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="block text-xs text-slate-500 mb-1">边界对齐</label>
+                    <select v-model="p.align"
+                      class="w-full px-2 py-1 border border-slate-300 rounded text-sm bg-white">
+                      <option value="day">自然日</option>
+                      <option value="hour">自然小时</option>
+                      <option value="week">自然周</option>
+                      <option value="month">自然月</option>
+                      <option value="rolling">滚动窗口</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="block text-xs text-slate-500 mb-1">上传阈值</label>
+                    <input v-model="p.threshold_total" placeholder="500GiB 或 536870912000"
+                      class="w-full px-2 py-1 border border-slate-300 rounded text-sm mono bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                    <p class="text-[11px] text-slate-400 mt-0.5">支持 500G / 500GiB / 字节数</p>
+                  </div>
+                  <div>
+                    <label class="block text-xs text-slate-500 mb-1">限速至</label>
+                    <input v-model="p.limit_total" placeholder="1M 或 1048576"
+                      class="w-full px-2 py-1 border border-slate-300 rounded text-sm mono bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                    <p class="text-[11px] text-slate-400 mt-0.5">支持 1M / 512K / 0 表示不限</p>
+                  </div>
+                </div>
+
+                <div class="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <label class="block text-xs text-slate-500 mb-1">作用下载器</label>
+                    <select v-model="p.clients" multiple size="3"
+                      class="w-full px-2 py-1 border border-slate-300 rounded text-sm bg-white">
+                      <option v-for="c in ptClients" :key="c.name" :value="c.name">{{ c.name }}</option>
+                    </select>
+                    <p class="text-[11px] text-slate-400 mt-0.5">不选表示全部下载器</p>
+                  </div>
+                  <div class="space-y-2">
+                    <div>
+                      <label class="block text-xs text-slate-500 mb-1">解除限速后速度（可选）</label>
+                      <input v-model="p.resume_limit_total" placeholder="留空 = 恢复原始限速"
+                        class="w-full px-2 py-1 border border-slate-300 rounded text-sm mono bg-white">
+                    </div>
+                    <label class="flex items-center gap-1 text-xs text-slate-600">
+                      <input type="checkbox" v-model="p.resume_on_window_reset" class="rounded">
+                      进入新周期后自动解除限速
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <div class="flex flex-wrap gap-2 items-center">
+                <button @click="ptAddPolicy()" type="button"
+                  class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs">+ 添加策略</button>
+                <div class="flex-1"></div>
+                <span v-if="ptPolicyDirty" class="text-[11px] text-amber-600">有未保存的修改</span>
+                <button @click="savePtPolicies()" :disabled="ptPolicyBusy"
+                  class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md text-xs disabled:opacity-50">
+                  {{ ptPolicyBusy ? '保存中…' : '保存策略' }}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -875,9 +1101,7 @@
               class="text-[11px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 font-normal">不可用</span>
           </h3>
           <p class="text-xs text-slate-500 mb-3 leading-relaxed">
-            监控 qBittorrent / Transmission 的上传流量，达到阈值自动限速、新周期自动恢复。
-            下方的配置以 <strong>YAML</strong> 形式直接编辑——这样能完整表达下载器、策略、
-            通知等全部结构，不受界面字段数量的限制。
+            配置要监控的下载器。<strong>限速策略</strong>在左侧「PT 策略」页单独维护。
           </p>
 
           <div v-if="!pt.available"
@@ -885,39 +1109,103 @@
             当前环境未包含 PT 子服务二进制（源码方式运行时会这样）。用 Docker 镜像部署即可获得完整功能。
           </div>
 
-          <div class="flex flex-wrap gap-2 mb-2 items-center">
-            <button @click="loadPtConfig()" :disabled="ptCfgBusy"
-              class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs disabled:opacity-50">
-              {{ ptCfgBusy ? '加载中…' : '重新加载配置' }}
-            </button>
-            <button @click="fillPtExample()" :disabled="ptCfgBusy"
-              class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs disabled:opacity-50">
-              填入配置模板
-            </button>
-            <div class="flex-1"></div>
-            <span v-if="ptCfgDirty" class="text-[11px] text-amber-600">有未保存的修改</span>
+          <!-- 下载器列表 -->
+          <div v-if="pt.running" class="space-y-3">
+            <div v-for="(c, i) in ptClients" :key="i"
+                 class="border border-slate-200 rounded-lg p-3 space-y-3">
+              <div class="flex items-center gap-2">
+                <span class="text-xs text-slate-400 mono w-5">{{ i + 1 }}</span>
+                <input v-model="c.name" placeholder="名称（如 qb-main）"
+                  class="px-2 py-1 border border-slate-300 rounded text-sm w-40 focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                <select v-model="c.type"
+                  class="px-2 py-1 border border-slate-300 rounded text-sm">
+                  <option value="qbittorrent">qBittorrent</option>
+                  <option value="transmission">Transmission</option>
+                </select>
+                <label class="flex items-center gap-1 text-xs text-slate-600">
+                  <input type="checkbox" v-model="c.enabled" class="rounded"> 启用
+                </label>
+                <div class="flex-1"></div>
+                <button @click="ptRemoveClient(i)" type="button"
+                  class="text-rose-600 hover:bg-rose-50 px-2 py-1 rounded text-xs">删除</button>
+              </div>
+
+              <div class="grid gap-3 sm:grid-cols-2">
+                <div class="sm:col-span-2">
+                  <label class="block text-xs text-slate-500 mb-1">地址（URL）</label>
+                  <input v-model="c.url" :placeholder="c.type === 'qbittorrent' ? 'http://192.168.1.10:8080' : 'http://192.168.1.10:9091'"
+                    class="w-full px-2 py-1 border border-slate-300 rounded text-sm mono focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                </div>
+                <div>
+                  <label class="block text-xs text-slate-500 mb-1">用户名</label>
+                  <input v-model="c.username"
+                    class="w-full px-2 py-1 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                </div>
+                <div>
+                  <label class="block text-xs text-slate-500 mb-1">
+                    密码
+                    <span v-if="c.has_password" class="text-slate-400">（已设置，留空不修改）</span>
+                  </label>
+                  <input v-model="c.password" type="password"
+                    :placeholder="c.has_password ? '••••••••' : ''"
+                    class="w-full px-2 py-1 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                </div>
+                <div v-if="c.supports_api_key" class="sm:col-span-2">
+                  <label class="block text-xs text-slate-500 mb-1">
+                    API Key（qBittorrent 5.2.0+，可选）
+                    <span v-if="c.has_api_key" class="text-slate-400">（已设置 {{ c.api_key_hint }}，留空不修改）</span>
+                  </label>
+                  <input v-model="c.api_key" placeholder="qbt_xxxxxxxx"
+                    class="w-full px-2 py-1 border border-slate-300 rounded text-sm mono focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                  <p class="text-[11px] text-slate-400 mt-1">填写后走 Bearer 认证，优先于用户名密码</p>
+                </div>
+                <div class="sm:col-span-2 flex flex-wrap items-center gap-4">
+                  <label class="flex items-center gap-1 text-xs text-slate-600">
+                    <input type="checkbox" v-model="c.insecure_skip_verify" class="rounded">
+                    跳过 TLS 证书校验（自签名 NAS）
+                  </label>
+                  <div class="flex items-center gap-1">
+                    <span class="text-xs text-slate-500">超时</span>
+                    <input v-model="c.timeout" placeholder="10s"
+                      class="px-2 py-1 border border-slate-300 rounded text-xs w-20 mono">
+                  </div>
+                  <button v-if="c.name" @click="ptTestClient(c.name)" :disabled="ptTesting === c.name"
+                    class="text-sky-600 hover:underline text-xs disabled:opacity-50">
+                    {{ ptTesting === c.name ? '测试中…' : '测试连接' }}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="text-sm text-slate-400 py-2" v-if="!ptClients.length">
+              还没有添加下载器。点下方「添加下载器」开始。
+            </div>
+
+            <div class="flex flex-wrap gap-2 items-center pt-1">
+              <button @click="ptAddClient()" type="button"
+                class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs">+ 添加下载器</button>
+              <div class="flex-1"></div>
+              <span v-if="ptFormDirty" class="text-[11px] text-amber-600">有未保存的修改</span>
+              <button @click="savePtForm()" :disabled="ptFormBusy"
+                class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md text-xs disabled:opacity-50">
+                {{ ptFormBusy ? '保存中…' : '保存' }}
+              </button>
+            </div>
           </div>
 
-          <textarea v-model="ptCfgYaml" rows="16" spellcheck="false"
-            placeholder="点击「填入配置模板」或「重新加载配置」开始"
-            class="w-full px-3 py-2 border border-slate-300 rounded-md text-xs mono resize-y focus:outline-none focus:ring-2 focus:ring-emerald-400"></textarea>
-
-          <div class="flex flex-wrap gap-2 mt-2 items-center">
-            <button @click="savePtConfig()" :disabled="ptCfgBusy || !pt.running"
-              class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md text-xs disabled:opacity-50">
-              {{ ptCfgBusy ? '保存中…' : '保存并生效' }}
+          <div class="flex flex-wrap gap-2 mt-3 pt-3 border-t border-slate-100">
+            <button @click="loadPtForm()" :disabled="ptFormBusy || !pt.running"
+              class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs disabled:opacity-50">
+              重新加载
             </button>
             <button @click="restartPt()" :disabled="ptBusy"
               class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs disabled:opacity-50">
               {{ ptBusy ? '重启中…' : '重启子服务' }}
             </button>
+            <div class="flex-1"></div>
             <a href="/btg/" target="_blank" rel="noopener"
-               class="px-3 py-1.5 text-sky-600 hover:underline text-xs">打开原始面板 ↗</a>
+               class="px-3 py-1.5 text-sky-600 hover:underline text-xs">原始面板 ↗</a>
           </div>
-          <p class="text-[11px] text-slate-400 mt-2">
-            保存后会热重载，不会丢失当前周期进度与限速状态。
-            「原始面板」是子服务自带的完整界面，本页字段不够用时可去那里操作。
-          </p>
         </div>
 
         <!-- Webhook -->
@@ -1231,13 +1519,14 @@ createApp({
       { key: 'rules',     label: 'CD2 规则', icon: '⚙️', desc: '配置源路径关键字、超时阈值与重试策略' },
       { key: 'tasks',     label: '任务监控', icon: '📤', desc: '实时上传、秒传记录与重试队列' },
       { key: 'p115',      label: '115 云下载', icon: '☁️', desc: '云下载任务、超时阈值与取消日志' },
-      { key: 'logs',      label: '事件日志', icon: '📋', desc: '系统事件、异常、任务操作与 PT 策略事件（统一汇总）' },
-      { key: 'pt',        label: 'PT 策略', icon: '📶', desc: '上传流量监控与限速策略' },
+      { key: 'pt',        label: 'PT 策略', icon: '📶', desc: '上传流量监控、限速策略与下载器' },
       { key: 'settings',  label: '系统设置', icon: '🔧', desc: 'CD2 / 115 / PT 流量配置与 Webhook' },
+      // 事件日志放最后：它是排查用的辅助页，日常操作频率最低
+      { key: 'logs',      label: '事件日志', icon: '📋', desc: '系统事件、异常、任务操作与 PT 策略事件（统一汇总）' },
     ];
 
     const dash = reactive({
-      cd2: {}, p115: {}, pt: {}, stats: {}, scheduler: { jobs: [] },
+      cd2: {}, p115: {}, pt: { running: false, available: false }, stats: {}, scheduler: { jobs: [] },
     });
     const rules = ref([]);
     const liveTasks = ref([]);
@@ -1265,11 +1554,23 @@ createApp({
     const policies = ref([]);
     const ptBusy = ref(false);
     const ptTesting = ref('');
-    // PT 配置（YAML 原文）
-    const ptCfgYaml = ref('');
-    const ptCfgOriginal = ref('');
-    const ptCfgBusy = ref(false);
-    const ptCfgDirty = computed(() => ptCfgYaml.value !== ptCfgOriginal.value);
+    // ---- PT 下载器配置（系统设置页）----
+    // 用结构化表单而非 YAML 文本：字段类型明确、有校验、不会写错缩进。
+    const ptClients = ref([]);
+    const ptFormOriginal = ref('');
+    const ptFormBusy = ref(false);
+    const ptFormDirty = computed(
+      () => JSON.stringify(ptClients.value) !== ptFormOriginal.value
+    );
+
+    // ---- PT 限速策略（PT 策略页）----
+    const ptPolicies = ref([]);
+    const ptPolicyOriginal = ref('');
+    const ptPolicyBusy = ref(false);
+    const ptPolicyDirty = computed(
+      () => JSON.stringify(ptPolicies.value) !== ptPolicyOriginal.value
+    );
+
     const logAutoRefresh = ref(false);
     const logLevels = [
       { key: 'error',   label: '错误' },
@@ -1428,12 +1729,17 @@ createApp({
         }
         if (tab.value === 'settings') {
           await loadSettings();
-          // 进入设置页时顺带刷新 PT 状态；配置内容按需加载（避免覆盖用户正在编辑的内容）
+          // 进入设置页时顺带刷新 PT 状态与下载器表单；
+          // 若用户正在编辑（有未保存修改），不覆盖输入。
           if (!pt.running || !pt.available) await loadPt();
-          else if (!ptCfgYaml.value && !ptCfgDirty.value) await loadPtConfig();
+          else if (!ptFormDirty.value) await loadPtForm();
         }
         if (tab.value === 'logs') await loadEvents();
-        if (tab.value === 'pt') await loadPt();
+        if (tab.value === 'pt') {
+          await loadPt();
+          // 策略配置按需加载，避免覆盖正在编辑的内容
+          if (!ptPolicyDirty.value) await loadPtPolicies();
+        }
         lastRefresh.value = Date.now();
       } catch (e) {
         showToast('刷新失败：' + e.message, 'error');
@@ -1543,58 +1849,194 @@ createApp({
       return fmtSize(n) + '/s';
     };
 
-    // ---------- PT 配置（系统设置内） ----------
-    const loadPtConfig = async () => {
+    // ---------- PT 下载器配置（系统设置内） ----------
+    const _normalizeClients = (list) => {
+      return (list || []).map((c) => ({
+        name: c.name || '',
+        type: c.type || 'qbittorrent',
+        url: c.url || '',
+        username: c.username || '',
+        // 密码/API Key：Go 侧返回的是脱敏值，留空表示不修改
+        password: '',
+        api_key: '',
+        enabled: c.enabled !== false,
+        insecure_skip_verify: !!c.insecure_skip_verify,
+        timeout: c.timeout || '10s',
+        // 只读派生字段，提交时不发
+        has_password: !!c.has_password,
+        has_api_key: !!c.has_api_key,
+        api_key_hint: c.api_key_hint || '',
+        supports_api_key: c.type === 'qbittorrent',
+      }));
+    };
+
+    /** 提交时去掉只读字段，避免后端校验报错 */
+    const _payloadClients = (list) => {
+      return (list || []).map((c) => ({
+        name: c.name,
+        type: c.type,
+        url: c.url,
+        username: c.username,
+        password: c.password || '',
+        api_key: c.api_key || '',
+        enabled: c.enabled,
+        insecure_skip_verify: c.insecure_skip_verify,
+        timeout: c.timeout || '10s',
+      }));
+    };
+
+    const loadPtForm = async () => {
       if (!pt.running) {
-        // 子服务没起来时读不到配置，先给出明确提示而不是静默失败
         showToast('PT 子服务未运行，无法读取配置', 'error');
         return;
       }
-      ptCfgBusy.value = true;
+      ptFormBusy.value = true;
       try {
-        const r = await api('GET', '/api/pt/config');
-        ptCfgYaml.value = r.yaml || '';
-        ptCfgOriginal.value = ptCfgYaml.value;
+        const r = await api('GET', '/api/pt/form');
+        ptClients.value = _normalizeClients(r.clients);
+        ptFormOriginal.value = JSON.stringify(ptClients.value);
       } catch (e) {
         showToast('读取配置失败：' + e.message, 'error');
       } finally {
-        ptCfgBusy.value = false;
+        ptFormBusy.value = false;
       }
     };
 
-    const fillPtExample = async () => {
-      ptCfgBusy.value = true;
-      try {
-        const r = await api('GET', '/api/pt/config/example');
-        if (!r.yaml) {
-          showToast(r.error || '未找到配置模板', 'error');
-          return;
-        }
-        ptCfgYaml.value = r.yaml;
-        showToast('已填入模板，按需修改后保存', 'success');
-      } catch (e) {
-        showToast('获取模板失败：' + e.message, 'error');
-      } finally {
-        ptCfgBusy.value = false;
-      }
+    const ptAddClient = () => {
+      ptClients.value.push({
+        name: '',
+        type: 'qbittorrent',
+        url: '',
+        username: '',
+        password: '',
+        api_key: '',
+        enabled: true,
+        insecure_skip_verify: false,
+        timeout: '10s',
+        has_password: false,
+        has_api_key: false,
+        api_key_hint: '',
+        supports_api_key: true,
+      });
     };
 
-    const savePtConfig = async () => {
-      if (!ptCfgYaml.value.trim()) {
-        showToast('配置内容不能为空', 'error');
-        return;
+    const ptRemoveClient = (i) => {
+      ptClients.value.splice(i, 1);
+    };
+
+    const savePtForm = async () => {
+      // 基本校验：名称与地址必填
+      for (const c of ptClients.value) {
+        if (!c.name.trim()) { showToast('下载器名称不能为空', 'error'); return; }
+        if (!c.url.trim()) { showToast(`「${c.name}」的地址不能为空`, 'error'); return; }
       }
-      ptCfgBusy.value = true;
+      const dup = new Set();
+      for (const c of ptClients.value) {
+        if (dup.has(c.name)) { showToast(`下载器名称重复：${c.name}`, 'error'); return; }
+        dup.add(c.name);
+      }
+
+      ptFormBusy.value = true;
       try {
-        const r = await api('PUT', '/api/pt/config', { yaml: ptCfgYaml.value });
-        showToast(r.message || '配置已保存并生效', 'success');
-        ptCfgOriginal.value = ptCfgYaml.value;
-        await loadPt();
+        // Go 侧要求提交完整表单：先读当前配置，只替换 clients
+        const current = await api('GET', '/api/pt/form');
+        current.clients = _payloadClients(ptClients.value);
+        const r = await api('PUT', '/api/pt/form', current);
+        showToast(r.message || '已保存', 'success');
+        await Promise.all([loadPtForm(), loadPt()]);
       } catch (e) {
-        // 配置语法错误是常见情况，直接把后端返回的原因显示出来
         showToast('保存失败：' + e.message, 'error');
       } finally {
-        ptCfgBusy.value = false;
+        ptFormBusy.value = false;
+      }
+    };
+
+    // ---------- PT 限速策略（PT 策略页） ----------
+    const _normalizePolicies = (list) => {
+      return (list || []).map((p) => ({
+        name: p.name || '',
+        enabled: p.enabled !== false,
+        clients: Array.isArray(p.clients) ? [...p.clients] : [],
+        window: p.window || '24h',
+        align: p.align || 'day',
+        threshold_total: p.threshold_total || '',
+        limit_total: p.limit_total || '',
+        resume_limit_total: p.resume_limit_total || '',
+        resume_on_window_reset: p.resume_on_window_reset !== false,
+        cooldown: p.cooldown || '0s',
+      }));
+    };
+
+    const _payloadPolicies = (list) => {
+      return (list || []).map((p) => ({
+        name: p.name,
+        enabled: p.enabled,
+        clients: p.clients || [],
+        window: p.window,
+        align: p.align,
+        threshold_total: String(p.threshold_total || ''),
+        limit_total: String(p.limit_total || ''),
+        resume_limit_total: String(p.resume_limit_total || ''),
+        resume_on_window_reset: p.resume_on_window_reset,
+        cooldown: p.cooldown || '0s',
+      }));
+    };
+
+    const loadPtPolicies = async () => {
+      if (!pt.running) return;
+      try {
+        const list = await api('GET', '/api/pt/policies/config');
+        ptPolicies.value = _normalizePolicies(list);
+        ptPolicyOriginal.value = JSON.stringify(ptPolicies.value);
+      } catch (e) {
+        showToast('读取策略失败：' + e.message, 'error');
+      }
+    };
+
+    const ptAddPolicy = () => {
+      ptPolicies.value.push({
+        name: '',
+        enabled: true,
+        clients: [],
+        window: '24h',
+        align: 'day',
+        threshold_total: '',
+        limit_total: '',
+        resume_limit_total: '',
+        resume_on_window_reset: true,
+        cooldown: '0s',
+      });
+    };
+
+    const ptRemovePolicy = (i) => {
+      ptPolicies.value.splice(i, 1);
+    };
+
+    const savePtPolicies = async () => {
+      for (const p of ptPolicies.value) {
+        if (!p.name.trim()) { showToast('策略名称不能为空', 'error'); return; }
+        if (!String(p.threshold_total).trim()) {
+          showToast(`策略「${p.name}」需要填写上传阈值`, 'error');
+          return;
+        }
+      }
+      const dup = new Set();
+      for (const p of ptPolicies.value) {
+        if (dup.has(p.name)) { showToast(`策略名称重复：${p.name}`, 'error'); return; }
+        dup.add(p.name);
+      }
+
+      ptPolicyBusy.value = true;
+      try {
+        const r = await api('PUT', '/api/pt/policies/config', {
+          policies: _payloadPolicies(ptPolicies.value),
+        });
+        showToast(r.message || '策略已保存', 'success');
+        await Promise.all([loadPtPolicies(), loadPt()]);
+      } catch (e) {
+        showToast('保存失败：' + e.message, 'error');
+      } finally {
+        ptPolicyBusy.value = false;
       }
     };
 
@@ -1721,25 +2163,28 @@ createApp({
     const allRetrySelected = computed(() =>
       nonInstantPage.items.length > 0 && selectedRetry.value.length === nonInstantPage.items.length);
 
+    // 说明：这些操作都会改变记录数量，而标签页角标与仪表盘卡片读的是
+    // dash.stats —— 因此必须同时刷新列表与统计，否则数字会残留，
+    // 用户得手动刷新整页才更新。
     const batchRetry = async () => {
       try {
         const r = await api('POST', '/api/tasks/non-instant/retry', { ids: selectedRetry.value });
         showToast(r.message, r.affected ? 'success' : 'error');
-        await loadNonInstant(nonInstantPage.page);
+        await Promise.all([loadNonInstant(nonInstantPage.page), loadDashboard()]);
       } catch (e) { showToast(e.message, 'error'); }
     };
     const singleRetry = async (row) => {
       try {
         const r = await api('POST', '/api/tasks/non-instant/retry', { ids: [row.id] });
         showToast(r.message, r.affected ? 'success' : 'error');
-        await loadNonInstant(nonInstantPage.page);
+        await Promise.all([loadNonInstant(nonInstantPage.page), loadDashboard()]);
       } catch (e) { showToast(e.message, 'error'); }
     };
     const batchCancelRetry = async () => {
       try {
         const r = await api('POST', '/api/tasks/non-instant/cancel', { ids: selectedRetry.value });
         showToast(r.message, 'success');
-        await loadNonInstant(nonInstantPage.page);
+        await Promise.all([loadNonInstant(nonInstantPage.page), loadDashboard()]);
       } catch (e) { showToast(e.message, 'error'); }
     };
     const batchDeleteRetry = async () => {
@@ -1747,13 +2192,13 @@ createApp({
       try {
         const r = await api('DELETE', '/api/tasks/non-instant?ids=' + selectedRetry.value.join(','));
         showToast(r.message, 'success');
-        await loadNonInstant(nonInstantPage.page);
+        await Promise.all([loadNonInstant(nonInstantPage.page), loadDashboard()]);
       } catch (e) { showToast(e.message, 'error'); }
     };
     const deleteRetryOne = async (row) => {
       try {
         await api('DELETE', '/api/tasks/non-instant?ids=' + row.id);
-        await loadNonInstant(nonInstantPage.page);
+        await Promise.all([loadNonInstant(nonInstantPage.page), loadDashboard()]);
       } catch (e) { showToast(e.message, 'error'); }
     };
     const clearInstant = async () => {
@@ -1761,7 +2206,10 @@ createApp({
       try {
         const r = await api('DELETE', '/api/tasks/instant');
         showToast(r.message, 'success');
-        await loadInstant(1);
+        // 必须同时刷新列表与统计：
+        // 标签页角标上的数字来自 dash.stats，只刷列表的话数字会残留，
+        // 用户必须手动刷新整页才干净。
+        await Promise.all([loadInstant(1), loadDashboard()]);
       } catch (e) { showToast(e.message, 'error'); }
     };
 
@@ -1854,33 +2302,81 @@ createApp({
     };
 
     // ---------- 计算属性 ----------
-    const dashboardCards = computed(() => {
-      const s = dash.stats || {};
-      const p = dash.pt || {};
-      const cards = [
-        { label: '今日秒传', value: s.today_instant ?? 0, hint: `累计 ${s.total_instant ?? 0} 条`, color: 'text-emerald-600' },
-        { label: '当前上传中', value: s.live_uploads ?? 0, hint: '监控范围内的任务', color: 'text-sky-600' },
-        { label: '等待重试', value: (s.waiting_retry ?? 0) + (s.retrying ?? 0), hint: `失败 ${s.retry_failed ?? 0} 条`, color: 'text-amber-600' },
-        { label: '今日云下载取消', value: s.today_cancelled_offline ?? 0, hint: `累计 ${s.total_cancelled_offline ?? 0} 条`, color: 'text-rose-600' },
-        { label: '启用规则', value: s.enabled_rules ?? 0, hint: `共 ${s.total_rules ?? 0} 条`, color: 'text-indigo-600' },
+    // ---------- 仪表盘派生数据 ----------
+    // 设计原则：顶部只放「服务是否健康」，指标按业务分组，异常单独突出，
+    // 参数细节折叠——避免把十几项数据平铺成一堵墙。
+    const serviceCards = computed(() => {
+      const c = dash.cd2 || {};
+      const p = dash.p115 || {};
+      const t = dash.pt || {};
+      return [
+        {
+          key: 'cd2',
+          title: 'CloudDrive2',
+          ok: !!c.connected && !!c.authenticated,
+          warn: !!c.connected && !c.authenticated,
+          statusText: c.connected
+            ? (c.authenticated ? '已连接' : '待鉴权')
+            : '未连接',
+          detail: c.host || '未配置地址',
+          sub: c.last_poll_error
+            || (c.connected ? `上传队列 ${c.upload_count ?? 0} 个` : ''),
+          goto: 'settings',
+        },
+        {
+          key: 'p115',
+          title: '115 网盘',
+          ok: !!p.logged_in,
+          warn: !!p.configured && !p.logged_in,
+          statusText: p.logged_in ? '已登录' : (p.configured ? 'Cookie 失效' : '未配置'),
+          detail: p.configured ? 'Cookie 已配置' : '请先填入 Cookie',
+          sub: p.last_poll_error || (p.logged_in ? `云下载任务 ${p.task_count ?? 0} 个` : ''),
+          goto: 'settings',
+        },
+        {
+          key: 'pt',
+          title: 'PT 流量',
+          ok: !!t.running,
+          warn: !!t.available && !t.running,
+          statusText: t.running ? '运行中' : (t.available ? '未运行' : '不可用'),
+          detail: t.running
+            ? `上传 ${fmtSpeed(t.up_speed)} · ${t.client_online ?? 0}/${t.client_count ?? 0} 在线`
+            : (t.last_error || '子服务未启动'),
+          sub: t.running ? `本周期 ${fmtSize(t.window_bytes)}` : '去设置里配置下载器',
+          goto: 'pt',
+        },
+        {
+          key: 'sched',
+          title: '后台调度',
+          ok: !!dash.scheduler?.running,
+          warn: false,
+          statusText: dash.scheduler?.running ? '正常运行' : '未启动',
+          detail: `${dash.scheduler?.jobs?.length ?? 0} 个定时任务`,
+          sub: '',
+          goto: 'logs',
+        },
       ];
-      // PT 流量总览：仅在子服务可用时展示，避免仪表盘出现一排 0 误导用户
-      if (p.running) {
-        cards.push({
-          label: 'PT 上传速度',
-          value: fmtSpeed(p.up_speed),
-          hint: `本周期 ${fmtSize(p.window_bytes)}`,
-          color: 'text-emerald-600',
-        });
-        cards.push({
-          label: 'PT 下载器',
-          value: `${p.client_online ?? 0}/${p.client_count ?? 0}`,
-          hint: `限速中 ${p.policy_limited ?? 0} 个策略`,
-          color: (p.policy_limited ?? 0) > 0 ? 'text-rose-600' : 'text-slate-800',
-        });
-      }
-      return cards;
     });
+
+    // 只有真的出错时才显示，平时不占版面
+    const dashboardErrors = computed(() => {
+      const out = [];
+      const c = dash.cd2 || {};
+      const p = dash.p115 || {};
+      const t = dash.pt || {};
+      if (c.last_poll_error) {
+        out.push({ source: 'CD2', message: c.last_poll_error, goto: 'settings' });
+      }
+      if (p.last_poll_error) {
+        out.push({ source: '115', message: p.last_poll_error, goto: 'settings' });
+      }
+      if (t.last_error && t.available) {
+        out.push({ source: 'PT', message: t.last_error, goto: 'pt' });
+      }
+      return out;
+    });
+
+    const dashDetailOpen = ref(false);
     const currentTab = computed(() => tabs.find(t => t.key === tab.value) || tabs[0]);
     const taskSubTabs = computed(() => [
       { key: 'live', label: '实时上传', count: dash.stats?.live_uploads || 0 },
@@ -2022,9 +2518,14 @@ body = '''
       logLevel, logLevels, logAutoRefresh, logLevelLabel, logLevelClass,
       pt, clients, policies, ptCards, ptBusy, ptTesting,
       loadPt, ptPolicyAction, ptTestClient, restartPt, fmtSpeed,
-      ptCfgYaml, ptCfgBusy, ptCfgDirty, loadPtConfig, fillPtExample, savePtConfig,
+      // PT 下载器配置（系统设置）
+      ptClients, ptFormBusy, ptFormDirty, ptAddClient, ptRemoveClient,
+      loadPtForm, savePtForm,
+      // PT 限速策略（PT 策略页）
+      ptPolicies, ptPolicyBusy, ptPolicyDirty, ptAddPolicy, ptRemovePolicy,
+      loadPtPolicies, savePtPolicies,
       instantQuery, retryQuery, retryStatus, selectedRetry, allRetrySelected,
-      ruleEditor, dashboardCards, thresholdHours, webhookUrl, testing,
+      ruleEditor, serviceCards, dashboardErrors, dashDetailOpen, thresholdHours, webhookUrl, testing,
       retryStatChips,
       webhookTemplate, webhookRecords, webhookChecked, checkWebhook, copyText,
       switchTab, refreshAll, fmtDur, fmtSize, fmtTime, fmtAgo,

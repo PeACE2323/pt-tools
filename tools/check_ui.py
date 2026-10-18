@@ -83,6 +83,13 @@ def returned_identifiers(script: str) -> set[str]:
     if end < 0:
         return set()
     block = script[idx + len("return {"): end]
+
+    # 关键：先剥掉注释。return 块里允许写分组注释（如 // PT 配置），
+    # 若不清除，按逗号切分时注释会与后一行的标识符粘连，
+    # 导致该标识符被漏统计，进而误报「模板引用了未暴露的标识符」。
+    block = re.sub(r"/\*.*?\*/", "", block, flags=re.DOTALL)
+    block = re.sub(r"//[^\n]*", "", block)
+
     names: set[str] = set()
     for raw in block.split(","):
         token = raw.strip()
@@ -174,6 +181,9 @@ def check(path: Path) -> list[str]:
         cleaned = cleaned.replace("$event", "")
         # 去掉对象字面量的键名 key:
         cleaned = re.sub(r"\b[A-Za-z_$][\w$]*\s*:(?!:)", "", cleaned)
+        # 去掉字符串字面量：'list' / "tasks" 这类是值不是变量引用，
+        # 否则 tab==='list' 里的 list 会被误判为未暴露的标识符。
+        cleaned = re.sub(r"'[^']*'|\"[^\"]*\"", "''", cleaned)
         used.update(IDENT_RE.findall(cleaned))
 
     for m in MUSTACHE_RE.finditer(template):

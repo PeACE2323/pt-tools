@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ..services.btguard import BTGuardManager, _proxy_unavailable, get_btg_manager
@@ -259,3 +259,128 @@ async def pt_config_example() -> dict[str, Any]:
         except OSError:
             continue
     return {"yaml": "", "error": "未找到示例配置"}
+
+
+# ===========================================================================
+# 图形化配置（下载器 / 通用设置）
+# ===========================================================================
+@router.get("/form", summary="读取图形化配置（下载器等）")
+async def pt_get_form(
+    mgr: BTGuardManager = Depends(get_btg_manager),
+) -> dict[str, Any]:
+    """结构化配置，用于界面表单。
+
+    Go 侧已实现结构化视图（密码脱敏、未修改语义），直接透传即可。
+    """
+    if not mgr.status.running:
+        raise _unavailable(mgr.status.last_error or "子服务未运行，无法读取配置")
+    try:
+        return await mgr.fetch_form_config()
+    except _proxy_unavailable as exc:
+        raise _unavailable(exc) from exc
+
+
+@router.put("/form", summary="保存图形化配置（下载器等）")
+async def pt_put_form(
+    payload: dict[str, Any] = Body(...),
+    mgr: BTGuardManager = Depends(get_btg_manager),
+) -> dict[str, Any]:
+    """按结构化载荷保存。
+
+    前端只改下载器与通用项；策略在 PT 策略页单独维护 ——
+    但 Go 侧要求提交完整表单，所以前端会先读一次、改完整体提交，
+    未改动的策略原样带回，不会丢失。
+
+    **通知功能已从本项目中移除**：保存时强制关闭所有通知渠道，
+    即使提交的载荷里带着通知字段也不会生效。
+    """
+    if not mgr.status.running:
+        raise _unavailable("子服务未运行")
+
+    # 强制禁用通知：本项目不提供通知功能，也不希望它在后台偷偷发消息。
+    payload = _strip_notify(payload)
+
+    try:
+        return await mgr.save_form_config(payload)
+    except _proxy_unavailable as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+def _strip_notify(payload: dict[str, Any]) -> dict[str, Any]:
+    """把载荷里的通知配置全部置为关闭/空，并移除相关字段。
+
+    这样即使前端或旧配置里带着 ntfy / webhook 设置，保存后也不会再
+    触发任何外部请求。
+    """
+    if not isinstance(payload, dict):
+        return payload
+    out = dict(payload)
+    out["notify"] = {
+        "enabled": False,
+        "notify_on": [],
+        "ntfy_enabled": False,
+        "ntfy_url": "",
+        "ntfy_topic": "",
+        "ntfy_token": "",
+        "ntfy_priority": "",
+        "webhook_enabled": False,
+        "webhook_url": "",
+        "webhook_method": "POST",
+        "webhook_format": "json",
+        "webhook_headers": {},
+    }
+    return out
+
+
+# ===========================================================================
+# 限速策略（在「PT 策略」页维护）
+# ===========================================================================
+@router.get("/policies/config", summary="读取策略配置（可编辑）")
+async def pt_policies_config(
+    mgr: BTGuardManager = Depends(get_btg_manager),
+) -> list[dict[str, Any]]:
+    """返回可编辑的策略配置列表。
+
+    与 ``/api/pt/policies``（运行状态）不同，这里是**配置**：
+    窗口、阈值、限速值等，用于表单编辑。
+    """
+    if not mgr.status.running:
+        raise _unavailable(mgr.status.last_error or "子服务未运行，无法读取策略")
+    try:
+        form = await mgr.fetch_form_config()
+    except _proxy_unavailable as exc:
+        raise _unavailable(exc) from exc
+    return form.get("policies") or []
+
+
+class PolicyListPayload(BaseModel):
+    """保存整套策略配置。"""
+
+    policies: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@router.put("/policies/config", summary="保存策略配置")
+async def pt_put_policies(
+    payload: PolicyListPayload,
+    mgr: BTGuardManager = Depends(get_btg_manager),
+) -> dict[str, Any]:
+    """保存策略。
+
+    Go 侧的表单提交要求完整配置，所以这里先读一次当前表单，
+    只替换 policies 后整体提交 —— 下载器等其它配置原样保留。
+    """
+    if not mgr.status.running:
+        raise _unavailable("子服务未运行")
+    try:
+        current = await mgr.fetch_form_config()
+    except _proxy_unavailable as exc:
+        raise _unavailable(exc) from exc
+
+    current = _strip_notify(current)
+    current["policies"] = payload.policies
+
+    try:
+        result = await mgr.save_form_config(current)
+    except _proxy_unavailable as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return result

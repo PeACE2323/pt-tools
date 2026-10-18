@@ -404,6 +404,35 @@ class BTGuardManager:
         """``/api/config``：脱敏后的结构化配置。"""
         return await self._get_json("/api/config")
 
+    async def fetch_form_config(self) -> dict:
+        """``/api/config/form``：图形化表单用的结构化配置。
+
+        Go 侧已经把配置做成了结构化视图（含密码脱敏、"未修改"语义），
+        直接用这个接口，比自己解析 YAML 再拼回去可靠得多。
+        """
+        return await self._get_json("/api/config/form")
+
+    async def save_form_config(self, payload: dict) -> dict:
+        """``PUT /api/config/form``：按结构化载荷保存并热重载。"""
+        import httpx
+
+        try:
+            resp = await self._client().put("/api/config/form", json=payload)
+        except httpx.HTTPError as exc:
+            raise _proxy_unavailable(str(exc)) from exc
+        if resp.status_code >= 400:
+            detail = resp.text[:300]
+            try:
+                body = resp.json()
+                detail = body.get("error") or body.get("message") or detail
+            except ValueError:
+                pass
+            raise _proxy_unavailable(detail)
+        try:
+            return resp.json()
+        except ValueError:
+            return {"ok": True}
+
     async def fetch_config_yaml(self) -> str:
         """``/api/config/raw``：原始 YAML 文本。
 

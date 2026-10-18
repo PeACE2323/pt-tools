@@ -246,11 +246,22 @@ jobs:
           PY
 
           echo "--- 策略与客户端接口 ---"
-          for p in /api/pt/policies /api/pt/clients /api/pt/events; do
+          for p in /api/pt/policies /api/pt/clients /api/pt/events /api/pt/form /api/pt/policies/config; do
             code=$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8899${p}")
             echo "GET ${p} -> ${code}"
             [ "$code" = "200" ] || exit 1
           done
+
+          echo "--- 表单结构校验 ---"
+          curl -sS http://127.0.0.1:8899/api/pt/form -o /tmp/ptform.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/ptform.json'))
+          for key in ("general", "clients", "policies"):
+              assert key in d, f"表单缺少 {key}"
+          print("表单结构 OK: clients=%d, policies=%d"
+                % (len(d["clients"]), len(d["policies"])))
+          PY
 
           echo "--- 仪表盘含 PT 字段 ---"
           curl -sS http://127.0.0.1:8899/api/dashboard -o /tmp/dash.json

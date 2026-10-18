@@ -131,11 +131,55 @@ def test_ui_uses_native_render_not_iframe():
 
 
 def test_ui_has_policy_and_config():
-    """策略页与设置页的 PT 配置块都要存在。"""
-    assert "ptPolicyAction" in UI, "缺少策略操作"
-    assert "savePtConfig" in UI, "缺少配置保存"
-    assert "ptCfgYaml" in UI
-    print("✓ 策略操作与配置编辑已就位")
+    """策略页与设置页都要有可用的表单操作。"""
+    # PT 策略页：策略编辑
+    assert "ptPolicyAction" in UI, "缺少策略运行操作（解除限速/触发）"
+    assert "savePtPolicies" in UI, "缺少策略配置保存"
+    assert "ptPolicies" in UI
+    # 系统设置：下载器表单
+    assert "savePtForm" in UI, "缺少下载器配置保存"
+    assert "ptClients" in UI
+    print("✓ 策略编辑与下载器表单已就位")
+
+
+def test_no_yaml_editor():
+    """配置不再用 YAML 文本框，改为图形化表单。"""
+    assert "ptCfgYaml" not in UI, "仍残留 YAML 编辑器"
+    assert 'placeholder="点击「填入配置模板」' not in UI
+    print("✓ 已移除 YAML 编辑器")
+
+
+def test_notify_removed():
+    """通知功能已移除：保存时强制关闭。"""
+    assert "_strip_notify" in PT_API, "缺少通知剥离逻辑"
+    body = PT_API[PT_API.find("def _strip_notify"):]
+    assert '"enabled": False' in body
+    assert "ntfy_enabled" in body and "webhook_enabled" in body
+    print("✓ 通知功能已禁用")
+
+
+def test_policies_config_routes():
+    """策略要通过原生接口读写。"""
+    assert "/policies/config" in PT_API
+    assert "def pt_put_policies" in PT_API
+    print("✓ 策略配置接口存在")
+
+
+def test_form_routes():
+    """下载器配置走结构化表单接口。"""
+    assert "/form" in PT_API
+    assert "fetch_form_config" in BTG_SVC
+    assert "save_form_config" in BTG_SVC
+    print("✓ 图形化配置接口存在")
+
+
+def test_dashboard_redesigned():
+    """仪表盘改版：服务状态卡 + 分组指标 + 可折叠详情。"""
+    assert "serviceCards" in UI, "缺少服务状态卡"
+    assert "dashboardErrors" in UI, "缺少异常聚合"
+    assert "dashDetailOpen" in UI, "缺少可折叠的运行详情"
+    assert "dashboardCards" not in UI, "旧的一排指标卡应已移除"
+    print("✓ 仪表盘已重构")
 
 
 def test_tab_keys_updated():
