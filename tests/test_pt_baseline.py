@@ -121,6 +121,53 @@ def test_progress_not_exploded():
     print("✓ 超额时进度为 500%（前端截断显示）")
 
 
+def test_ui_has_uniform_content_width():
+    """所有页面应共用同一套内容宽度约束。
+
+    之前各页面宽度不一致：仪表盘与 CD2 守卫内部有栅格撑开，观感正常；
+    而 115 / PT 策略 / 系统设置 / 事件日志直接顶到两侧边缘。
+    """
+    import re
+
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    # 存在统一的内容宽度容器
+    assert "max-w-[1400px]" in ui, "缺少统一的内容宽度约束"
+    assert "mx-auto" in ui, "内容未居中"
+
+    # 该容器必须包住所有页面（在第一个页面之前、</main> 之前闭合）
+    first_page = ui.find("tab==='dashboard'")
+    wrap = ui.find("max-w-[1400px]")
+    assert 0 < wrap < first_page, "宽度容器未包住页面内容"
+    print("✓ 所有页面共用统一内容宽度")
+
+
+def test_div_tags_balanced():
+    """div 标签必须配对。
+
+    之前合并页面时多/少写了一个 </div>，会导致后面的页面整体
+    结构错位（样式错乱、内容溢出）。
+    """
+    import re
+
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    b = ui.find("<body")
+    e = ui.find("<script>")
+    seg = re.sub(r"<!--.*?-->", "", ui[b:e], flags=re.DOTALL)
+    opened = len(re.findall(r"<div\b", seg))
+    closed = len(re.findall(r"</div>", seg))
+    assert opened == closed, f"div 不配对: {opened} 开 / {closed} 闭"
+    print(f"✓ div 标签配对（{opened} 对）")
+
+
+def test_pt_page_has_skeleton():
+    """PT 策略页首屏应有骨架，避免上半部分空白。"""
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    assert "ptReady" in ui, "缺少 PT 首屏就绪标志"
+    assert 'v-if="!ptReady"' in ui, "缺少 PT 首屏骨架"
+    print("✓ PT 策略页首屏骨架")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

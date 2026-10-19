@@ -102,6 +102,14 @@
     </transition>
 
     <div class="p-6 overflow-auto flex-1">
+      <!--
+        统一内容宽度。
+        之前各页面的容器宽度不一致：仪表盘和 CD2 守卫内部有栅格撑开，
+        看起来居中且留白正常；而 115 / PT 策略 / 系统设置 / 事件日志
+        的内容直接顶到两侧边缘，观感割裂。
+        这里统一加最大宽度并居中，所有页面共用同一套留白规则。
+      -->
+      <div class="mx-auto w-full max-w-[1400px]">
 
       <!-- ============ 仪表盘 ============ -->
       <div v-if="tab==='dashboard'" class="space-y-5">
@@ -533,8 +541,6 @@
         </div>
       </div>
 
-      </div>
-
       <!-- ============ 115 云下载 ============ -->
       <div v-if="tab==='p115'" class="space-y-4">
         <div class="grid sm:grid-cols-3 gap-4">
@@ -675,7 +681,20 @@
 
         <template v-else>
           <!-- 实时速率 -->
-          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <!--
+            首屏骨架：pt 状态是异步加载的，未就绪时 4 张卡会渲染成
+            空白占位块，看上去就是「上半部分一片空白」。
+            这里在拿到数据前显示脉冲骨架，观感与仪表盘一致。
+          -->
+          <div v-if="!ptReady" class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div v-for="i in 4" :key="i"
+                 class="bg-white rounded-lg border border-slate-200 p-4 animate-pulse">
+              <div class="h-3 w-16 bg-slate-200 rounded mb-2"></div>
+              <div class="h-7 w-24 bg-slate-200 rounded"></div>
+              <div class="h-2.5 w-20 bg-slate-100 rounded mt-2"></div>
+            </div>
+          </div>
+          <div v-else class="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <div v-for="c in ptCards" :key="c.label"
                  class="bg-white rounded-lg border border-slate-200 p-4">
               <div class="text-xs text-slate-500 mb-1">{{ c.label }}</div>
@@ -1348,6 +1367,9 @@
           显示最近 {{ events.length }} 条。CD2 断连、115 Cookie 失效、任务拦截与重试等都会记录在这里，便于排查问题。
         </p>
       </div>
+
+      </div><!-- /max-w 内容宽度容器 -->
+    </div><!-- /p-6 滚动容器 -->
   </main>
 
   <!-- ===================== 规则编辑弹窗 ===================== -->
@@ -1514,6 +1536,8 @@ createApp({
     const clients = ref([]);
     const policies = ref([]);
     const ptTesting = ref('');
+    // 是否已拿到首份 PT 数据（用于首屏骨架，避免卡片空白）
+    const ptReady = ref(false);
     // ---- PT 下载器配置（系统设置页）----
     // 用结构化表单而非 YAML 文本：字段类型明确、有校验、不会写错缩进。
     const ptClients = ref([]);
@@ -1756,6 +1780,7 @@ createApp({
       try {
         const ov = await api('GET', '/api/pt/overview');
         Object.assign(pt, ov);
+        ptReady.value = true;
         if (!ov.running) {
           clients.value = [];
           policies.value = [];
@@ -2592,7 +2617,7 @@ body = '''
       events, settings, form, p115Config, taskTab, p115Tab, taskSubTabs, p115SubTabs,
       switchTaskTab, switchP115Tab,
       logLevel, logLevels, logAutoRefresh, logLevelLabel, logLevelClass,
-      pt, clients, policies, ptCards, ptTesting,
+      pt, clients, policies, ptCards, ptTesting, ptReady,
       loadPt, ptPolicyAction, ptTestClient, fmtSpeed,
       // PT 下载器配置（系统设置）
       ptClients, ptFormBusy, ptFormDirty, ptAddClient, ptRemoveClient,
