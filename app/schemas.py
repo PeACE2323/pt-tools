@@ -141,6 +141,9 @@ class UploadTaskOut(ORMModel):
     dest_path: str
     size: int
     transferred: int
+    #: 生命周期内最大传输量。CD2 任务完成后常把 transferred 归零，
+    #: 用它能看出「到底传没传过数据」。
+    transferred_peak: int = 0
     status_text: str
     status_enum: int
     operator_type: int

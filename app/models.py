@@ -206,6 +206,15 @@ class UploadTaskSnapshot(Base):
     dest_path: Mapped[str] = mapped_column(Text, nullable=False, default="")
     size: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     transferred: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    # 整个生命周期内观测到的**最大**传输字节数。
+    #
+    # 为什么需要它：``transferred`` 是 CD2 某一瞬间的值，任务完成后
+    # CD2 常把它归零或直接移除任务。若只用最后一次快照判断「有没有
+    # 传过数据」，会把真实上传误判成秒传（反之也可能漏记）。
+    # 判定秒传应该看「这期间最多传到过多少」。
+    transferred_peak: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0
+    )
     status_text: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     status_enum: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     operator_type: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -414,6 +423,8 @@ def migrate_added_columns() -> None:
     wanted: dict[str, list[tuple[str, str]]] = {
         "upload_tasks": [
             ("queued_sec", "FLOAT NOT NULL DEFAULT 0.0"),
+            # 判定秒传要看「这期间最多传到过多少」，而不是最后一瞬的值
+            ("transferred_peak", "BIGINT NOT NULL DEFAULT 0"),
         ],
         "instant_uploads": [
             ("transferred_bytes", "BIGINT NOT NULL DEFAULT 0"),

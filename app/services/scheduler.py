@@ -391,6 +391,7 @@ class GuardScheduler:
                     dest_path=task.dest_path,
                     size=task.size,
                     transferred=task.transferred_bytes,
+                    transferred_peak=int(task.transferred_bytes or 0),
                     status_text=task.status_name,
                     status_enum=task.status_enum,
                     operator_type=task.operator_type,
@@ -411,6 +412,12 @@ class GuardScheduler:
                 snapshot.dest_path = task.dest_path
                 snapshot.size = task.size
                 snapshot.transferred = task.transferred_bytes
+                # 记录峰值：CD2 在任务完成后会把 transferred 归零，
+                # 只看最后一瞬会把「真传过数据」误判成秒传。
+                snapshot.transferred_peak = max(
+                    int(snapshot.transferred_peak or 0),
+                    int(task.transferred_bytes or 0),
+                )
                 snapshot.status_text = task.status_name
                 snapshot.status_enum = task.status_enum
                 snapshot.operator_type = task.operator_type
@@ -513,14 +520,33 @@ class GuardScheduler:
         #
         # 秒传尤其可能「来不及看到 Finish 就消失」，若直接判 gone 就会
         # 漏记。这里补一条「消失即完成」的兜底判定。
+        #
+        # 关于宽限期：之前不管是哪种情况都等 120 秒，导致 CD2 早已显示
+        # 上传完毕、本系统还挂着「上传中」，然后一批任务同时消失。
+        # 现在分两种情况：
+        #   * 最后一次观测已在「传输中」且传过数据 —— 大概率正在收尾，
+        #     给它稍长的宽限（TASK_GONE_GRACE_SEC），避免中途抖动误判；
+        #   * 其余情况（排队中、几乎没传数据）—— 用较短的宽限
+        #     （TASK_GONE_FAST_SEC），尽快把状态收敛到「已完成」。
         for key, snapshot in existing.items():
             if key in seen_keys:
                 continue
             if snapshot.state in ("done", "gone"):
                 continue
 
-            # 消失满一个宽限期仍未再出现 —— 视为已结束
-            if now - snapshot.last_seen_at > C.TASK_GONE_GRACE_SEC:
+            vanished_sec = now - (snapshot.last_seen_at or now)
+            ratio = 0.0
+            if int(snapshot.size or 0) > 0:
+                ratio = int(snapshot.transferred_peak or 0) / int(snapshot.size)
+            was_transferring = (
+                snapshot.status_enum in C.CD2_STATUS_TRANSFERRING
+                and ratio >= 0.01
+            )
+            grace = (
+                C.TASK_GONE_GRACE_SEC if was_transferring else C.TASK_GONE_FAST_SEC
+            )
+
+            if vanished_sec > grace:
                 rule = rules_by_id.get(snapshot.matched_rule_id) if snapshot.matched_rule_id else None
                 completed = self._handle_task_vanished(session, snapshot, now, rule)
                 snapshot.state = "done" if completed else "gone"
@@ -545,18 +571,38 @@ class GuardScheduler:
         :return: True 表示已按秒传记录处理，False 表示任务确实已离开。
         """
         size = int(snapshot.size or 0)
-        transferred = int(snapshot.transferred or 0)
+        # 同样用峰值：消失前最后一次观测可能恰好是 0
+        transferred = int(
+            getattr(snapshot, "transferred_peak", 0)
+            or snapshot.transferred
+            or 0
+        )
 
         if size <= 0:
+            logger.info(
+                "任务消失但无大小信息，无法判定是否秒传: %s（task_key=%s）",
+                snapshot.file_name, snapshot.task_key,
+            )
             return False
         # 已经传了明显的数据量，说明是真实上传后结束（或失败），不记秒传
         if transferred / size >= 0.01:
+            logger.info(
+                "任务消失且已传输 %.1f%% 数据（真实上传完成，非秒传）: %s",
+                transferred / size * 100, snapshot.file_name,
+            )
             return False
         # 状态是明确的失败，不记秒传
         if snapshot.status_enum in C.CD2_STATUS_FAILED:
+            logger.info(
+                "任务消失且状态为失败，不计入秒传: %s（status=%s）",
+                snapshot.file_name, snapshot.status_text,
+            )
             return False
         # 从未被任何规则命中，不记
         if snapshot.matched_rule_id is None:
+            logger.info(
+                "任务消失但未命中任何规则，不计入秒传: %s", snapshot.file_name
+            )
             return False
 
         elapsed = max(0.0, now - (snapshot.first_seen_at or now))
@@ -601,7 +647,15 @@ class GuardScheduler:
         字节判断时，才退回用耗时。
         """
         size = int(getattr(snapshot, "size", 0) or 0)
-        transferred = int(getattr(snapshot, "transferred", 0) or 0)
+        # 用生命周期内的**峰值**而不是最后一瞬的值：
+        # CD2 完成任务后常把 transferred 归零，只看末值会把真实上传
+        # 误判成秒传；反之若首次观测时还是 0、之后涨上去了，
+        # 只看首值又会漏判。
+        transferred = int(
+            getattr(snapshot, "transferred_peak", 0)
+            or getattr(snapshot, "transferred", 0)
+            or 0
+        )
 
         # ---- 主判据：是否真的传了数据 ----
         if size > 0:

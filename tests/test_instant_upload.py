@@ -139,6 +139,65 @@ def test_vanished_failed_task_not_instant():
     print("✓ 消失判定已排除失败任务与未命中规则的任务")
 
 
+def test_uses_peak_transferred():
+    """判定要用生命周期内最大传输量，不能用最后一瞬的值。
+
+    CD2 在任务完成后常把 transferedBytes 归零，甚至直接把任务移出列表。
+    若只看最后一次快照，会把「真传过数据」误判成秒传；
+    反之首次观测为 0、之后涨上去的，又会漏判。
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    src = (root / "app" / "services" / "scheduler.py").read_text(encoding="utf-8")
+
+    # 记录峰值
+    assert "transferred_peak" in src, "调度器未记录传输峰值"
+    idx = src.find("snapshot.transferred_peak = max(")
+    assert idx > 0, "未在轮询中更新峰值"
+
+    # 两处判定都要用峰值
+    for fn in ("_handle_task_vanished", "_record_instant_upload"):
+        i = src.find(f"def {fn}")
+        assert i > 0, f"未找到 {fn}"
+        seg = src[i : i + 1600]
+        assert "transferred_peak" in seg, f"{fn} 未使用峰值判定"
+    print("✓ 秒传判定使用传输峰值（不受 CD2 归零影响）")
+
+def test_peak_field_has_migration():
+    """新增字段必须有 ALTER TABLE 迁移，否则老库会报错。"""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    models = (root / "app" / "models.py").read_text(encoding="utf-8")
+    assert "transferred_peak" in models, "模型缺少字段"
+    idx = models.find("migrate_added_columns")
+    seg = models[idx : idx + 2000]
+    assert "transferred_peak" in seg, "缺少迁移定义"
+    print("✓ 峰值字段有数据库迁移")
+
+
+def test_gone_grace_is_tiered():
+    """任务消失的宽限期应分档，不能一律等 120 秒。
+
+    之前统一 120 秒，导致 CD2 早已显示完成、面板还挂「上传中」，
+    然后一批任务同时消失。
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    cfg = (root / "app" / "config.py").read_text(encoding="utf-8")
+    assert "TASK_GONE_FAST_SEC" in cfg, "缺少快速宽限期"
+    assert "TASK_GONE_GRACE_SEC" in cfg
+
+    src = (root / "app" / "services" / "scheduler.py").read_text(encoding="utf-8")
+    idx = src.find("was_transferring")
+    assert idx > 0, "未实现分档判定"
+    seg = src[idx : idx + 400]
+    assert "TASK_GONE_FAST_SEC" in seg and "TASK_GONE_GRACE_SEC" in seg
+    print("✓ 消失宽限期分档（快速收敛）")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

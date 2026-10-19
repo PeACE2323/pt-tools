@@ -152,7 +152,15 @@ CD2_RPC_TIMEOUT = 10.0
 CD2_RECONNECT_BASE = 2.0
 CD2_RECONNECT_MAX = 60.0
 # 任务在 CD2 列表中连续消失多少秒后，才认定“已从队列移除”
-TASK_GONE_GRACE_SEC = 120.0
+#
+# 分两档：
+#   TASK_GONE_FAST_SEC  —— 消失前几乎没传数据（秒传 / 刚结束），快速收敛
+#   TASK_GONE_GRACE_SEC —— 消失前仍在传输且有数据量，多等一会儿防抖动
+#
+# 之前统一用 120 秒，导致 CD2 已完成、面板还显示「上传中」，
+# 然后一批任务同时消失，观感很差。
+TASK_GONE_FAST_SEC = 12.0
+TASK_GONE_GRACE_SEC = 40.0
 # 单轮轮询最多处理多少条超时任务（防止积压时一次性打爆 CD2）
 MAX_INTERCEPT_PER_ROUND = 20
 # 单轮最多触发多少次重试
