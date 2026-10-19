@@ -26,6 +26,7 @@ SUITES = [
     "test_cd2_guard.py",
     "test_health.py",
     "test_pt_python.py",
+    "test_pt_baseline.py",
 ]
 
 

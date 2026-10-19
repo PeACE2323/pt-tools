@@ -725,6 +725,10 @@
                     / {{ fmtSize(p.threshold_total) }}</span>
                   <span>限速至 <b class="text-slate-700">{{ fmtSpeed(p.limit_total) }}</b></span>
                   <span v-if="p.limited && p.limited_for">已限速 {{ p.limited_for }}</span>
+                  <!-- 超额时单独标出来，避免只看到一个夸张的百分比 -->
+                  <span v-if="p.current_total > p.threshold_total" class="text-rose-600">
+                    已超额 {{ fmtSize(p.current_total - p.threshold_total) }}
+                  </span>
                   <span v-if="p.last_error" class="text-rose-600">{{ p.last_error }}</span>
                 </div>
               </div>

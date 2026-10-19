@@ -438,13 +438,39 @@ class PolicyEngine:
                 if rt.limited and cfg.resume_on_window_reset:
                     await self._resume(rt, clients, reason="进入新周期")
                 rt.window_key = key
+                # 只给「本轮采集成功」的客户端建立基线。
+                #
+                # 关键：若某个客户端这一轮没采到（离线 / 采集失败），
+                # 不能凭空给它一个 0 基线 —— 那样它下次上线时
+                # 「当前累计量 - 0」会把全部历史流量算进本周期，
+                # 进度直接爆表（曾出现 557.6%）。这类客户端留空，
+                # 等它真正采到时再单独初始化基线。
                 rt.baseline = {
                     name: int(snap.get("up_total") or 0)
                     for name, snap in snapshots.items()
-                    if cfg.applies_to(name)
+                    if cfg.applies_to(name) and snap.get("healthy", True)
                 }
-                logger.info("策略「%s」进入新周期 %s", cfg.name, key)
+                rt.used = 0
+                logger.info(
+                    "策略「%s」进入新周期 %s（基线：%d 个客户端）",
+                    cfg.name, key, len(rt.baseline),
+                )
                 continue
+
+            # 补齐缺失的基线：客户端本轮才第一次采到
+            for name, snap in snapshots.items():
+                if not cfg.applies_to(name):
+                    continue
+                if name in rt.baseline:
+                    continue
+                if not snap.get("healthy", True):
+                    continue
+                # 首次采到 → 以此刻为基线，避免把历史量算进来
+                rt.baseline[name] = int(snap.get("up_total") or 0)
+                logger.info(
+                    "客户端 %s 本轮首次可用，开始计入策略「%s」",
+                    name, cfg.name,
+                )
 
             # 更新基线：累计量回退（客户端重启）时重新对齐
             for name in list(rt.baseline):
