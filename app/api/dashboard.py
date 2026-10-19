@@ -9,7 +9,6 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..models import (
-    InstantUpload,
     NonInstantTask,
     P115CancelLog,
     P115OfflineTask,
@@ -68,22 +67,17 @@ async def dashboard(
     }
 
     # ---------------- 统计 ----------------
-    today_instant = (
-        session.query(func.count(InstantUpload.id))
-        .filter(InstantUpload.finished_at >= today_start)
-        .scalar()
-        or 0
-    )
-    total_instant = session.query(func.count(InstantUpload.id)).scalar() or 0
-
+    # 改造后不再统计秒传（CD2 不提供完成历史，统计必然不完整）。
+    # 只保留可靠的数据：拦截数量与重试结果。
     non_instant = dict(
         session.query(NonInstantTask.status, func.count(NonInstantTask.id))
         .group_by(NonInstantTask.status)
         .all()
     )
+    # 当前正在被监控的上传任务数（含排队与已拦截）
     live_uploads = (
         session.query(func.count(UploadTaskSnapshot.id))
-        .filter(UploadTaskSnapshot.state.in_(("active", "intercepted")))
+        .filter(UploadTaskSnapshot.state.in_(("queued", "active", "intercepted")))
         .scalar()
         or 0
     )
@@ -113,8 +107,6 @@ async def dashboard(
     total_rules = session.query(func.count(Rule.id)).scalar() or 0
 
     stats = {
-        "today_instant": int(today_instant),
-        "total_instant": int(total_instant),
         "live_uploads": int(live_uploads),
         "waiting_retry": int(non_instant.get("waiting", 0)),
         "retrying": int(non_instant.get("retrying", 0)),

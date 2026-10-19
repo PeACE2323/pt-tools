@@ -522,40 +522,6 @@ def test_startup_polls_immediately():
 
 
 # ---------------------------------------------------------------- 任务监控
-def test_instant_badge_matches_list():
-    """秒传详情角标必须与列表口径一致。
-
-    角标原先用 today_instant（今日数），列表展示的是全部记录。
-    记录不是今天产生时，角标有数字但列表为空——用户看到的就是
-    「有数字但没有详细信息」。
-    """
-    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-    api = (ROOT / "app" / "api" / "tasks.py").read_text(encoding="utf-8")
-
-    # 后端要提供总数
-    assert '"total_instant"' in api, "后端未提供 total_instant"
-
-    # 前端角标要用总数
-    idx = ui.find("{ key: 'instant'")
-    assert idx > 0
-    seg = ui[idx : idx + 120]
-    assert "total_instant" in seg, (
-        f"角标未使用 total_instant，实际: {seg.strip()[:80]}"
-    )
-    assert "today_instant" not in seg, "角标仍用今日数，与列表口径不一致"
-    print("✓ 秒传角标与列表口径一致")
-
-
-def test_instant_empty_state_actionable():
-    """列表为空但总数不为 0 时应给出可操作提示。"""
-    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-    idx = ui.find("暂无秒传记录")
-    assert idx > 0
-    seg = ui[max(0, idx - 700) : idx + 100]
-    assert "instantPage.total > 0" in seg, "缺少「有总数但列表空」的提示分支"
-    print("✓ 空列表给出可操作提示")
-
-
 def test_instant_list_tolerates_bad_row():
     """单条记录序列化失败不应让整页空白。"""
     api = (ROOT / "app" / "api" / "tasks.py").read_text(encoding="utf-8")
@@ -593,8 +559,9 @@ def test_subtab_switch_triggers_load():
     assert '@click="switchP115Tab(s.key)"' in ui, "缺少 switchP115Tab"
 
     # 两个切换函数内部要真正调用加载
+    # 任务监控的子页签现在是「监控规则 / 拦截与重试」
     for fn, loader in (
-        ("switchTaskTab", "loadInstant"),
+        ("switchTaskTab", "loadNonInstant"),
         ("switchP115Tab", "loadCancelLogs"),
     ):
         idx = ui.find(f"const {fn} = async")
