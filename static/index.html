@@ -369,70 +369,119 @@
           </button>
         </div>
 
-        <!-- 规则 -->
+        <!-- 监控文件夹 -->
         <div v-if="taskTab==='rules'" class="space-y-4">
 
         <div class="bg-sky-50 border border-sky-200 rounded-lg p-3 text-sm text-sky-800">
-          只监控<strong>命中规则</strong>的上传任务，其余任务完全不记录。
-          关键字为子串匹配（<code class="mono">PT</code> 也会命中 <code class="mono">apt</code>），
-          需精确匹配目录请勾选「正则」并填 <code class="mono">/PT/</code>。
+          只需告诉系统<strong>监控哪些源文件夹</strong>。
+          系统每 30 秒查询一次 CD2 上传列表：
+          <strong>有上传速度</strong>的计入待观察名单（秒传与排队中没有速度）；
+          同一个文件<strong>连续两次</strong>出现在名单上，即判定无法秒传，自动取消上传。
+          取消后由 CD2 备份任务自行重传，本系统不再介入。
         </div>
 
-        <div class="flex justify-end">
-          <button @click="openRuleEditor()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm rounded-md">
-            + 新建规则
-          </button>
+        <!-- 添加文件夹 -->
+        <div class="bg-white rounded-lg border border-slate-200 p-4">
+          <label class="block text-xs text-slate-500 mb-1">源文件夹路径（CD2 中的路径，如 /mnt/local/PT）</label>
+          <div class="flex gap-2">
+            <input v-model="newFolder" @keyup.enter="addFolder()"
+              placeholder="/mnt/local/PT"
+              class="flex-1 px-3 py-2 border border-slate-300 rounded-md text-sm mono focus:outline-none focus:ring-2 focus:ring-emerald-400">
+            <button @click="addFolder()" :disabled="!newFolder.trim()"
+              class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white rounded-md text-sm">
+              添加
+            </button>
+          </div>
+          <p class="text-[11px] text-slate-400 mt-1">
+            匹配规则：任务路径等于该文件夹，或以「文件夹/」开头。留空表示不监控任何任务。
+          </p>
         </div>
 
+        <!-- 已配置的文件夹 -->
         <div class="bg-white rounded-lg border border-slate-200 overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+            <h3 class="font-medium text-sm">已监控的文件夹</h3>
+            <span class="text-xs text-slate-400">{{ folders.length }} 个</span>
+          </div>
           <table class="w-full text-sm">
             <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
               <tr>
-                <th class="px-4 py-2.5 text-left">优先级</th>
-                <th class="px-4 py-2.5 text-left">名称</th>
-                <th class="px-4 py-2.5 text-left">关键字</th>
-                <th class="px-4 py-2.5 text-left">超时</th>
-                <th class="px-4 py-2.5 text-left">重试</th>
+                <th class="px-4 py-2.5 text-left">路径</th>
                 <th class="px-4 py-2.5 text-left">状态</th>
                 <th class="px-4 py-2.5 text-right">操作</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="r in rules" :key="r.id" class="border-t border-slate-100 hover:bg-slate-50/60">
-                <td class="px-4 py-2.5 mono text-slate-500">{{ r.priority }}</td>
-                <td class="px-4 py-2.5 font-medium">{{ r.name }}</td>
+              <tr v-for="(f, i) in folders" :key="f.path" class="border-t border-slate-100 hover:bg-slate-50/60">
+                <td class="px-4 py-2.5 mono text-xs">{{ f.path }}</td>
                 <td class="px-4 py-2.5">
-                  <div class="flex flex-wrap gap-1 max-w-xs">
-                    <span v-for="k in r.source_keywords.split('\n').filter(Boolean)" :key="k"
-                      class="mono text-[11px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-700">{{ k }}</span>
-                    <span v-if="r.is_regex" class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700">正则</span>
-                  </div>
-                </td>
-                <td class="px-4 py-2.5">{{ fmtDur(r.timeout_threshold) }}</td>
-                <td class="px-4 py-2.5 text-xs">
-                  {{ r.max_retry }} 次 / 间隔 {{ fmtDur(r.retry_interval) }}
-                </td>
-                <td class="px-4 py-2.5">
-                  <button @click="toggleRule(r)"
+                  <button @click="toggleFolder(i)"
                     :class="['text-xs px-2 py-0.5 rounded-full',
-                      r.enabled ? 'bg-emerald-100 text-emerald-700':'bg-slate-200 text-slate-500']">
-                    {{ r.enabled ? '启用':'禁用' }}
+                      f.enabled ? 'bg-emerald-100 text-emerald-700':'bg-slate-200 text-slate-500']">
+                    {{ f.enabled ? '监控中':'已暂停' }}
                   </button>
                 </td>
-                <td class="px-4 py-2.5 text-right whitespace-nowrap">
-                  <button @click="openRuleEditor(r)" class="text-sky-600 hover:underline text-xs mr-3">编辑</button>
-                  <button @click="deleteRule(r)" class="text-rose-600 hover:underline text-xs">删除</button>
+                <td class="px-4 py-2.5 text-right">
+                  <button @click="removeFolder(i)" class="text-rose-600 hover:underline text-xs">删除</button>
                 </td>
               </tr>
-              <tr v-if="!rules.length">
-                <td colspan="7" class="px-4 py-10 text-center text-slate-400 text-sm">
-                  还没有规则。不建规则时系统不会监控任何上传任务。
+              <tr v-if="!folders.length">
+                <td colspan="3" class="px-4 py-10 text-center text-slate-400 text-sm">
+                  还没有配置监控文件夹。不配置时系统不会监控任何上传任务。
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
-      
+
+        <div class="flex justify-end gap-2">
+          <button @click="saveFolders()" :disabled="foldersBusy"
+            class="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white rounded-md text-sm">
+            {{ foldersBusy ? '保存中…' : '保存设置' }}
+          </button>
+        </div>
+
+        <!-- 待观察名单 -->
+        <div class="bg-white rounded-lg border border-slate-200 overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+            <h3 class="font-medium text-sm">待观察名单</h3>
+            <span class="text-xs text-slate-400">
+              {{ watching.length }} 个任务有上传速度 · 连续 2 次即取消
+            </span>
+          </div>
+          <table class="w-full text-sm">
+            <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+              <tr>
+                <th class="px-4 py-2.5 text-left">文件名</th>
+                <th class="px-4 py-2.5 text-right">速度</th>
+                <th class="px-4 py-2.5 text-center">命中次数</th>
+                <th class="px-4 py-2.5 text-right">已观察</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="w in watching" :key="w.task_key" class="border-t border-slate-100">
+                <td class="px-4 py-2.5">
+                  <div class="font-medium max-w-[20rem] truncate" :title="w.file_name">{{ w.file_name }}</div>
+                  <div class="text-[11px] text-slate-400 mono truncate max-w-[20rem]">{{ w.source_path }}</div>
+                </td>
+                <td class="px-4 py-2.5 text-right mono text-xs">{{ fmtSpeed(w.speed) }}</td>
+                <td class="px-4 py-2.5 text-center">
+                  <span :class="['text-[11px] px-1.5 py-0.5 rounded',
+                    w.hits >= 2 ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700']">
+                    {{ w.hits }} / 2
+                  </span>
+                </td>
+                <td class="px-4 py-2.5 text-right text-xs text-slate-500">{{ fmtDur(w.observed_sec) }}</td>
+              </tr>
+              <tr v-if="!watching.length">
+                <td colspan="4" class="px-4 py-8 text-center text-slate-400 text-sm">
+                  暂无正在传输的任务
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
         </div>
 
         <div v-if="taskTab==='retry'" class="space-y-3">
@@ -1514,6 +1563,14 @@ createApp({
     // 是否已拿到第一份仪表盘数据（用于首屏骨架，避免状态闪烁）
     const dashReady = ref(false);
     const rules = ref([]);
+    // ---- CD2 守卫：监控文件夹 ----
+    // 只让用户填源文件夹；判定逻辑（连续两次有上传速度即取消）
+    // 完全由后端负责，前置无需其他配置。
+    const folders = ref([]);
+    const newFolder = ref('');
+    const foldersBusy = ref(false);
+    // 待观察名单：有上传速度、正在被计数的任务
+    const watching = ref([]);
     const nonInstantPage = reactive({ items: [], total: 0, page: 1, page_size: 50 });
     const offlineTasks = ref([]);
     const cancelLogsPage = reactive({ items: [], total: 0, page: 1, page_size: 50 });
@@ -1661,6 +1718,105 @@ createApp({
       dashReady.value = true;
     };
     const loadRules = async () => { rules.value = await api('GET', '/api/rules'); };
+
+    // ---------- CD2 守卫：监控文件夹 ----------
+    /**
+     * 把后端规则列表转成「文件夹」视图。
+     *
+     * 后端仍用 rules 表存储（source_keywords 每行一个路径），
+     * 这样旧数据能平滑保留，前端只暴露最必要的字段。
+     */
+    const _rulesToFolders = (list) => {
+      const out = [];
+      (list || []).forEach((r) => {
+        const lines = (r.source_keywords || '').split('\n').map(x => x.trim()).filter(Boolean);
+        lines.forEach((path) => {
+          out.push({ path, enabled: r.enabled !== false, ruleId: r.id });
+        });
+      });
+      return out;
+    };
+
+    const loadFolders = async () => {
+      rules.value = await api('GET', '/api/rules');
+      folders.value = _rulesToFolders(rules.value);
+    };
+
+    const addFolder = () => {
+      const path = newFolder.value.trim().replace(/\\/g, '/');
+      if (!path) return;
+      if (folders.value.some(f => f.path === path)) {
+        showToast('该文件夹已在监控列表中', 'error');
+        return;
+      }
+      folders.value.push({ path, enabled: true, ruleId: null });
+      newFolder.value = '';
+    };
+
+    const removeFolder = (i) => {
+      folders.value.splice(i, 1);
+    };
+
+    const toggleFolder = (i) => {
+      folders.value[i].enabled = !folders.value[i].enabled;
+    };
+
+    /**
+     * 保存文件夹配置。
+     *
+     * 后端规则表是「一条规则含多个关键字」的结构，这里统一收敛成
+     * **一条规则、多行路径**，既符合语义也避免规则数量膨胀。
+     * 原有规则会被这条统一规则取代 —— 这正是 v4 想要的效果：
+     * 用户只需要维护一组文件夹。
+     */
+    const saveFolders = async () => {
+      const lines = folders.value
+        .filter(f => f.enabled && f.path.trim())
+        .map(f => f.path.trim());
+
+      foldersBusy.value = true;
+      try {
+        const existing = await api('GET', '/api/rules');
+        const payload = {
+          name: 'CD2 监控文件夹',
+          enabled: true,
+          source_keywords: lines.join('\n'),
+          is_regex: false,
+          timeout_threshold: 60,
+          max_retry: 0,
+          retry_interval: 300,
+          priority: 1,
+          operator_filter: 'any',
+        };
+
+        if (existing && existing.length) {
+          // 复用第一条规则，其余删除，避免残留旧规则继续生效
+          await api('PUT', `/api/rules/${existing[0].id}`, payload);
+          for (const r of existing.slice(1)) {
+            await api('DELETE', `/api/rules/${r.id}`);
+          }
+        } else {
+          await api('POST', '/api/rules', payload);
+        }
+
+        showToast('监控文件夹已保存', 'success');
+        await loadFolders();
+      } catch (e) {
+        showToast('保存失败：' + e.message, 'error');
+      } finally {
+        foldersBusy.value = false;
+      }
+    };
+
+    // ---------- 待观察名单 ----------
+    const loadWatching = async () => {
+      try {
+        watching.value = await api('GET', '/api/tasks/watching');
+      } catch {
+        watching.value = [];
+      }
+    };
+
     const loadNonInstant = async (page = 1) => {
       const p = new URLSearchParams({ page, page_size: 50, q: retryQuery.value });
       if (retryStatus.value) p.set('status', retryStatus.value);
@@ -1708,9 +1864,11 @@ createApp({
       try {
         await loadDashboard();
         if (tab.value === 'tasks') {
-          // 两个子页签各自加载；默认进入「监控规则」
-          if (taskTab.value === 'rules') await loadRules();
-          else if (taskTab.value === 'retry') {
+          // 两个子页签各自加载；默认进入「监控文件夹」
+          if (taskTab.value === 'rules') {
+            await loadFolders();
+            await loadWatching();
+          } else if (taskTab.value === 'retry') {
             await loadNonInstant(nonInstantPage.page);
           }
         }
@@ -2146,8 +2304,12 @@ createApp({
     const switchTaskTab = async (key) => {
       taskTab.value = key;
       writeTabToHash('tasks');
-      if (key === 'rules') await loadRules();
-      else if (key === 'retry') await loadNonInstant(nonInstantPage.page || 1);
+      if (key === 'rules') {
+        await loadFolders();
+        await loadWatching();
+      } else if (key === 'retry') {
+        await loadNonInstant(nonInstantPage.page || 1);
+      }
     };
 
     const switchTab = async (key) => {
@@ -2613,7 +2775,9 @@ body = '''
 
     return {
       version, tab, tabs, currentTab, loading, saving, toast, dash, dashReady, lastRefreshText,
-      rules, nonInstantPage, offlineTasks, cancelLogsPage,
+      rules, folders, newFolder, foldersBusy, watching,
+      addFolder, removeFolder, toggleFolder, saveFolders, loadWatching,
+      nonInstantPage, offlineTasks, cancelLogsPage,
       events, settings, form, p115Config, taskTab, p115Tab, taskSubTabs, p115SubTabs,
       switchTaskTab, switchP115Tab,
       logLevel, logLevels, logAutoRefresh, logLevelLabel, logLevelClass,

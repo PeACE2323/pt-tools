@@ -1,25 +1,20 @@
-"""核心监控与重试调度引擎。
+"""核心监控调度引擎。
 
 两套独立任务，跑在 APScheduler 的 AsyncIOScheduler 上：
 
-1. ``poll_cd2_uploads``（默认每 3 秒）
+1. ``poll_cd2_uploads``（默认每 30 秒）—— CD2 守卫
    - 拉取 CD2 全量上传任务
-   - **作用域过滤**：只有命中监控规则的任务才会被记录与处理；
-     未命中规则的任务（例如只监控含 "PT" 的源路径时的其它上传）
-     完全不入库、不干预，避免污染统计与数据库
-   - 维护 ``first_seen_at``（持久化在 upload_tasks 表，进程重启不丢）
-   - 命中规则且**在阈值内完成** → 写 instant_uploads（秒传）
-   - 命中规则且**上传耗时 > 阈值仍未完成** → 触发拦截 → 写 non_instant_tasks
-   - 尝试重试后的任务若完成 → 标记 retry success
+   - **作用域过滤**：只有落在用户配置的源文件夹内的任务才参与判断
+   - **判定依据：有没有上传速度**（两轮之间字节数是否增长）
+       * 有速度 → 计入待观察名单
+       * 没速度 → 秒传或排队，不入名单
+   - **连续两次出现在名单上** → 判定无法秒传 → 自动取消上传
+   - 重试交由 CD2 的备份任务自行处理，本系统不再调度
 
 2. ``reap_p115_offline``（默认每 300 秒）
    - 拉取 115 云下载列表
    - ``now - add_time > 阈值`` 且未完成 → 删除离线任务（不删源文件）
    - 写 p115_cancel_logs
-
-重试执行 ``process_retry_queue``（默认每 10 秒）：
-   等待重试且到点 → pause_resume 策略调 ResumeUploadFiles；
-   或 cancel_reupload 策略调 retrigger_upload。
 """
 
 from __future__ import annotations
@@ -42,7 +37,6 @@ from ..models import (
     P115CancelLog,
     P115OfflineTask,
     Rule,
-    UploadTaskSnapshot,
     get_setting_bool,
     get_setting_float,
     get_setting_int,
@@ -59,7 +53,7 @@ from .p115_client import (
     P115Error,
     get_p115_client,
 )
-from .webhook import enrich_tasks, lookup_source_path
+from .webhook import enrich_tasks
 
 logger = get_logger("guard.scheduler")
 
@@ -105,64 +99,25 @@ class GuardScheduler:
             "retry_last_run": 0.0,
         }
 
-    async def _retrigger(
-        self, file_name: str, source_path: str, dest_path: str
-    ) -> bool:
-        """重新触发上传，优先使用 webhook 记录的真实源路径。
-
-        源路径取值顺序：
-
-        1. ``source_paths`` 表按文件名反查（webhook 写入，最可靠）；
-        2. 记录里保存的 ``source_path``（可能是 destPath 推导值）；
-        3. 都没有 → 直接失败。
-        """
-        resolved = source_path
-        try:
-            from_webhook = lookup_source_path(file_name)
-            if from_webhook:
-                resolved = from_webhook
-                logger.info(
-                    "使用 webhook 源路径重新触发: %s → %s",
-                    from_webhook, dest_path,
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("查询 webhook 源路径失败（忽略）: %s", exc)
-
-        if not resolved or not dest_path:
-            log_event(
-                "warning",
-                "scheduler",
-                f"缺少源路径，无法重新触发: {file_name}",
-                detail=f"source={resolved!r} dest={dest_path!r}",
-            )
-            return False
-
-        return await self.cd2.retrigger_upload(resolved, dest_path)
-
-    # ------------------------------------------------------------ 生命周期
     async def start(self) -> None:
         """加载配置并注册所有定时任务。"""
         if self._started:
             return
         await self.reload_config()
 
+        # CD2 守卫轮询：30 秒一轮。
+        #
+        # 这个间隔是「连续两次观察到上传速度」判定的时间基准：
+        # 两次轮询约 60 秒，足以区分「真的在传数据」和「秒传/排队」。
+        # 太短会给 CD2 造成压力，太长则拦截不够及时。
         self.scheduler.add_job(
             self.poll_cd2_uploads,
-            trigger=IntervalTrigger(seconds=3),
+            trigger=IntervalTrigger(seconds=30),
             id="poll_cd2_uploads",
             name="CD2 上传任务轮询",
             max_instances=1,
             coalesce=True,
             misfire_grace_time=10,
-        )
-        self.scheduler.add_job(
-            self.process_retry_queue,
-            trigger=IntervalTrigger(seconds=10),
-            id="process_retry_queue",
-            name="重试队列处理",
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=30,
         )
         self.scheduler.add_job(
             self.reap_p115_offline,
@@ -332,498 +287,106 @@ class GuardScheduler:
         rules: list[Rule],
         now: float,
     ) -> None:
-        """处理单个轮次的上传任务（含状态机转移）。"""
-        # ---- 1. 读取已有快照 ----
-        existing = {
-            row.task_key: row
-            for row in session.query(UploadTaskSnapshot).all()
-        }
+        """处理单个轮次的上传任务。
 
-        # 规则按 id 索引：任务消失时需要用其规则阈值判定秒传
-        rules_by_id = {r.id: r for r in rules}
+        新版逻辑（v4）：
 
-        # ---- 2. 读取活跃的重试记录（按 task_key 索引）----
-        retry_rows = {
-            row.task_key: row
-            for row in session.query(NonInstantTask)
-            .filter(NonInstantTask.status.in_(C.NON_INSTANT_ACTIVE_STATUSES))
-            .all()
-        }
+        1. 只要落在用户配置的源文件夹内的任务才参与判断
+        2. 用两轮之间的字节增量判断「有没有上传速度」
+        3. 连续两次有速度 → 判定无法秒传 → 取消上传
+        4. 重试交给 CD2 自己处理，本系统不再调度
 
-        seen_keys: set[str] = set()
-        # (命中的规则, 任务) —— 匹配结果随队列传递，避免二次查库
-        intercept_queue: list[tuple[MatchResult, UploadTask]] = []
-        # 本轮未被任何规则命中的 task_key：用于清理历史残留快照
-        unmatched_keys: set[str] = set()
-
-        for task in tasks:
-            if not task.key:
-                continue
-            seen_keys.add(task.key)
-
-            snapshot = existing.get(task.key)
-            retry_row = retry_rows.get(task.key)
-
-            is_finished = task.status_enum == C.CD2_STATUS_FINISH
-            is_failed = task.status_enum in C.CD2_STATUS_FAILED
-
-            # ---- 2.0 规则预匹配（作用域过滤）----
-            # 功能约定：只有落在监控规则范围内的任务才需要被记录。
-            # 例如只监控源路径含 "PT" 的上传任务，其余任务完全不入库、不干预。
-            match = match_rule(task, rules)
-
-            if match is None and retry_row is None:
-                # 既没命中规则、也不在重试队列中 → 彻底忽略该任务
-                unmatched_keys.add(task.key)
-                if snapshot is not None:
-                    # 规则被删除/禁用的历史残留：从实时表中移除
-                    session.delete(snapshot)
-                    existing.pop(task.key, None)
-                continue
-
-            # ---- 2.1 首次发现：创建快照 ----
-            if snapshot is None:
-                snapshot = UploadTaskSnapshot(
-                    task_key=task.key,
-                    file_name=task.file_name,
-                    source_path=task.source_path,
-                    dest_path=task.dest_path,
-                    size=task.size,
-                    transferred=task.transferred_bytes,
-                    transferred_peak=int(task.transferred_bytes or 0),
-                    status_text=task.status_name,
-                    status_enum=task.status_enum,
-                    operator_type=task.operator_type,
-                    first_seen_at=now,
-                    last_seen_at=now,
-                    state="active",
-                    error_message=task.error_message,
-                )
-                if match is not None:
-                    snapshot.matched_rule_id = match.rule_id
-                    snapshot.matched_rule_name = match.rule_name
-                session.add(snapshot)
-                existing[task.key] = snapshot
-            else:
-                # ---- 2.2 已有快照：更新动态字段 ----
-                snapshot.file_name = task.file_name
-                snapshot.source_path = task.source_path
-                snapshot.dest_path = task.dest_path
-                snapshot.size = task.size
-                snapshot.transferred = task.transferred_bytes
-                # 记录峰值：CD2 在任务完成后会把 transferred 归零，
-                # 只看最后一瞬会把「真传过数据」误判成秒传。
-                snapshot.transferred_peak = max(
-                    int(snapshot.transferred_peak or 0),
-                    int(task.transferred_bytes or 0),
-                )
-                snapshot.status_text = task.status_name
-                snapshot.status_enum = task.status_enum
-                snapshot.operator_type = task.operator_type
-                snapshot.last_seen_at = now
-                snapshot.error_message = task.error_message
-                if match is not None:
-                    snapshot.matched_rule_id = match.rule_id
-                    snapshot.matched_rule_name = match.rule_name
-
-            first_seen = snapshot.first_seen_at or now
-            elapsed = max(0.0, now - first_seen)
-
-            # ---- 2.3 重试中的任务：判定重试结果 ----
-            if retry_row is not None:
-                if is_finished:
-                    retry_row.status = C.STATUS_SUCCESS
-                    retry_row.finished_at = now
-                    snapshot.state = "done"
-                    log_event(
-                        "info",
-                        "scheduler",
-                        f"重试成功: {retry_row.file_name}",
-                        detail=(
-                            f"task_key={task.key} "
-                            f"retry={retry_row.retry_count}/{retry_row.max_retry} "
-                            f"dest={task.dest_path}"
-                        ),
-                    )
-                    retry_rows.pop(task.key, None)
-                elif is_failed and retry_row.status == C.STATUS_RETRYING:
-                    # 本轮重试失败，交给 process_retry_queue 决定下一轮
-                    retry_row.status = C.STATUS_WAITING
-                    retry_row.error_message = task.error_message or task.status_name
-                    retry_row.next_retry_at = now + retry_row.retry_interval
-                session.add(retry_row)
-                continue
-
-            # ---- 2.4 已完成的任务：直接结束，不做任何记录 ----
-            #
-            # 本系统只关心「不能秒传」的任务（超时 → 取消 → 重试）。
-            # 正常完成（含秒传）的任务不需要统计，因此直接标记结束。
-            if is_finished:
-                snapshot.state = "done"
-                continue
-
-            # ---- 2.5 已失败的任务：不拦截，只记录 ----
-            if is_failed:
-                snapshot.state = "done"
-                continue
-
-            # ---- 2.6 超时判定 ----
-            if match is None:
-                # 理论上到不了这里（2.0 已过滤），保留防御
-                continue
-
-            # 已进入 Pause 说明已被我们拦截过，不再重复计入超时
-            if task.status_enum == C.CD2_STATUS_PAUSE:
-                snapshot.state = "intercepted"
-                continue
-
-            # ★ 关键：只有 "Transfer"（真正在传数据）才计入上传超时。
-            #
-            # Preprocessing / Inqueue / WaitforPreprocessing 属于排队阶段，
-            # CD2 有并发上限，任务排队几十分钟是正常的，不能算「不能秒传」。
-            # 这里同时记录排队累计时长，供面板区分展示。
-            if task.status_enum in C.CD2_STATUS_QUEUED:
-                snapshot.state = "queued"
-                # 累计排队时长（按轮询间隔累加，避免依赖 CD2 提供的字段）
-                interval = max(0.0, now - (snapshot.last_seen_at or now))
-                snapshot.queued_sec = float(snapshot.queued_sec or 0.0) + interval
-                continue
-
-            if task.status_enum in C.CD2_STATUS_TRANSFERRING:
-                snapshot.state = "active"
-                # 真正的上传耗时 = 总耗时 - 排队耗时，避免排队时间被算进阈值
-                effective = max(0.0, elapsed - float(snapshot.queued_sec or 0.0))
-                if effective > match.timeout_threshold:
-                    intercept_queue.append((match, task))
-                continue
-
-        # ---- 3. 执行拦截（限制单轮数量，避免打爆 CD2）----
-        if intercept_queue:
-            await self._intercept_tasks(
-                session, intercept_queue[: C.MAX_INTERCEPT_PER_ROUND], now
-            )
-            if len(intercept_queue) > C.MAX_INTERCEPT_PER_ROUND:
-                logger.warning(
-                    "本轮待拦截 %d 条，仅处理前 %d 条",
-                    len(intercept_queue),
-                    C.MAX_INTERCEPT_PER_ROUND,
-                )
-
-        # ---- 4. 处理从 CD2 列表中消失的任务 ----
-        #
-        # 这两类任务都可能消失：
-        #   a) 正常完成 —— CD2 把已完成任务移出「上传任务」列表
-        #   b) 秒传 —— 太快，在两次轮询之间就完成并消失了
-        #
-        # 秒传尤其可能「来不及看到 Finish 就消失」，若直接判 gone 就会
-        # 漏记。这里补一条「消失即完成」的兜底判定。
-        #
-        # 关于宽限期：之前不管是哪种情况都等 120 秒，导致 CD2 早已显示
-        # 上传完毕、本系统还挂着「上传中」，然后一批任务同时消失。
-        # 现在分两种情况：
-        #   * 最后一次观测已在「传输中」且传过数据 —— 大概率正在收尾，
-        #     给它稍长的宽限（TASK_GONE_GRACE_SEC），避免中途抖动误判；
-        #   * 其余情况（排队中、几乎没传数据）—— 用较短的宽限
-        #     （TASK_GONE_FAST_SEC），尽快把状态收敛到「已完成」。
-        for key, snapshot in existing.items():
-            if key in seen_keys:
-                continue
-            if snapshot.state in ("done", "gone"):
-                continue
-
-            vanished_sec = now - (snapshot.last_seen_at or now)
-            ratio = 0.0
-            if int(snapshot.size or 0) > 0:
-                ratio = int(snapshot.transferred_peak or 0) / int(snapshot.size)
-            was_transferring = (
-                snapshot.status_enum in C.CD2_STATUS_TRANSFERRING
-                and ratio >= 0.01
-            )
-            grace = (
-                C.TASK_GONE_GRACE_SEC if was_transferring else C.TASK_GONE_FAST_SEC
-            )
-
-            if vanished_sec > grace:
-                rule = rules_by_id.get(snapshot.matched_rule_id) if snapshot.matched_rule_id else None
-                completed = self._handle_task_vanished(session, snapshot, now, rule)
-                snapshot.state = "done" if completed else "gone"
-
-        if unmatched_keys:
-            logger.debug(
-                "本轮忽略 %d 个不在监控规则内的任务", len(unmatched_keys)
-            )
-
-    def _handle_task_vanished(
-        self,
-        session,
-        snapshot: UploadTaskSnapshot,
-        now: float,
-        rule,
-    ) -> bool:
-        """任务从 CD2 列表中消失时的处理。
-
-        改造后本系统**不再统计秒传**，所以这里只做一件事：
-        确认任务已离开，把快照状态收敛掉。
-
-        保留该函数是因为调用方仍需要在「任务消失」时做状态转移；
-        之前这里会额外判定「是否秒传」并写记录，现已移除。
-
-        :return: 恒为 False，表示任务确实已离开（不是被记为秒传）。
+        相比旧版删掉了：状态机快照、超时计时、秒传判定、
+        重试队列推进 —— 那些都在「连续两次有速度」这一条规则下变得多余。
         """
-        logger.debug(
-            "任务已离开 CD2 队列: %s（task_key=%s）",
-            snapshot.file_name,
-            snapshot.task_key,
+        from .cd2_guard import get_cd2_guard
+
+        guard = get_cd2_guard()
+
+        # ---- 1. 收集用户配置的源文件夹 ----
+        folders: list[str] = []
+        for r in rules:
+            for line in (r.source_keywords or "").splitlines():
+                line = line.strip()
+                if line:
+                    folders.append(line)
+
+        if not folders:
+            # 没有配置任何文件夹 → 不监控任何任务，并清空观察名单
+            if guard.watching_count:
+                guard.reset()
+            return
+
+        # ---- 2. 更新待观察名单 ----
+        result = guard.observe(
+            tasks,
+            folders,
+            now=now,
+            cancel_threshold=C.CD2_CANCEL_AFTER_HITS,
         )
-        return False
 
-    async def _intercept_tasks(
-        self,
-        session,
-        queue: list[tuple[MatchResult, UploadTask]],
-        now: float,
-    ) -> None:
-        """对超时任务执行拦截动作，并写入重试队列。
-
-        由于上传来自 CD2 备份任务，拦截动作统一为：
-        **只取消该文件的上传任务**（不动整个备份，避免影响同一备份下的其他文件），
-        到点后由 ``BackupRestartWalkingThrough`` 让备份重新扫描并重传。
-
-        ``queue`` 中已携带匹配结果，无需二次查库；快照按 task_key 一次性取出。
-        """
-        if not queue:
+        # ---- 3. 取消判定为「无法秒传」的任务 ----
+        if not result.to_cancel:
             return
 
-        keys_all = [task.key for _m, task in queue]
-        snapshots = {
-            row.task_key: row
-            for row in session.query(UploadTaskSnapshot)
-            .filter(UploadTaskSnapshot.task_key.in_(keys_all))
-            .all()
-        }
-
-        # 只处理有快照的任务
-        targets = [(m, t) for m, t in queue if t.key in snapshots]
-        if not targets:
-            return
-
-        # ---- 执行 RPC：仅取消单个上传任务 ----
-        keys = [task.key for _m, task in targets]
-        succeeded: set[str] = set()
-        action_errors: dict[str, str] = {}
+        keys = [w.task_key for w in result.to_cancel]
         try:
-            await self.cd2.cancel_uploads(keys)
-            succeeded.update(keys)
+            cancelled = await self.cd2.cancel_uploads(keys)
         except CD2Error as exc:
-            logger.error("批量取消上传失败: %s", exc)
-            for key in keys:
-                action_errors[key] = str(exc)
-
-        # ---- 写重试队列 ----
-        for match, task in targets:
-            snapshot = snapshots.get(task.key)
-            if snapshot is None:
-                continue
-
-            ok = task.key in succeeded
-            error_text = action_errors.get(task.key, "")
-            if not ok:
-                # 拦截失败：保持 active，下一轮再试，不写队列以免状态错乱
-                log_event(
-                    "error",
-                    "scheduler",
-                    f"拦截失败: {task.file_name}",
-                    detail=f"action=cancel err={error_text}",
-                )
-                continue
-
-            snapshot.state = "intercepted"
-            elapsed = max(0.0, now - snapshot.first_seen_at)
-
-            # 已有记录则重置为新一轮重试
-            row = (
-                session.query(NonInstantTask)
-                .filter(NonInstantTask.task_key == task.key)
-                .order_by(NonInstantTask.id.desc())
-                .first()
-            )
-            if row is None:
-                row = NonInstantTask(
-                    task_key=task.key,
-                    file_name=task.file_name,
-                    source_path=task.source_path,
-                    dest_path=task.dest_path,
-                    size=task.size,
-                    rule_id=match.rule_id,
-                    rule_name=match.rule_name,
-                    first_seen_at=snapshot.first_seen_at,
-                    max_retry=match.max_retry,
-                    retry_interval=match.retry_interval,
-                    retry_strategy=match.retry_strategy,
-                    intercept_action=match.intercept_action,
-                    timeout_threshold=match.timeout_threshold,
-                )
-                session.add(row)
-            else:
-                row.file_name = task.file_name
-                row.source_path = task.source_path
-                row.dest_path = task.dest_path
-                row.size = task.size
-                row.rule_id = match.rule_id
-                row.rule_name = match.rule_name
-                row.max_retry = match.max_retry
-                row.retry_interval = match.retry_interval
-                row.retry_strategy = match.retry_strategy
-                row.intercept_action = match.intercept_action
-                row.timeout_threshold = match.timeout_threshold
-                row.first_seen_at = snapshot.first_seen_at
-
-            row.retry_count = 0
-            row.intercepted_at = now
-            row.last_uploaded_sec = round(elapsed, 3)
-            row.attempt_seen_at = None
-            row.finished_at = None
-            row.error_message = error_text
-            row.status = C.STATUS_WAITING
-            row.next_retry_at = now + match.retry_interval
-
+            logger.warning("取消上传失败: %s", exc)
             log_event(
-                "info",
-                "scheduler",
-                f"判定不能秒传并拦截: {task.file_name}",
-                detail=(
-                    f"action={match.intercept_action} "
-                    f"elapsed={elapsed:.1f}s > threshold={match.timeout_threshold}s "
-                    f"rule={match.rule_name} next_retry_in={match.retry_interval}s"
-                ),
-                session=session,
+                "error", "cd2", "取消上传失败", detail=str(exc)[:500]
             )
+            return
+
+        # ---- 4. 落库 + 记录事件 ----
+        for w in result.to_cancel:
+            guard.clear(w.task_key)
+            row = NonInstantTask(
+                task_key=w.task_key,
+                file_name=w.file_name,
+                source_path=w.source_path,
+                dest_path=w.dest_path,
+                size=w.size,
+                rule_name="源文件夹监控",
+                # 不重试：CD2 备份任务会自行重新扫描
+                status=C.STATUS_CANCELLED,
+                retry_count=0,
+                max_retry=0,
+                first_seen_at=w.first_seen_at,
+                intercepted_at=now,
+                finished_at=now,
+                error_message="",
+            )
+            session.add(row)
             logger.info(
-                "拦截[%s]: %s（已上传 %.1fs > 阈值 %ds），%ds 后重试",
-                match.intercept_action, task.file_name, elapsed,
-                match.timeout_threshold, match.retry_interval,
+                "已取消无法秒传的上传: %s（连续 %d 次检测到传输，%.1f KB/s）",
+                w.file_name,
+                w.hits,
+                w.last_speed / 1024,
+            )
+            log_event(
+                "warning",
+                "cd2",
+                f"已取消无法秒传的上传: {w.file_name}",
+                detail=(
+                    f"source={w.source_path} speed={int(w.last_speed)}B/s "
+                    f"hits={w.hits} size={w.size}"
+                ),
             )
 
-    # ======================================================================
-    # 重试队列
-    # ======================================================================
-    async def process_retry_queue(self) -> None:
-        """到点的重试任务执行 pause_resume / cancel_reupload。"""
-        now = utcnow_ts()
-        self.stats["retry_last_run"] = now
-
-        with session_scope() as session:
-            due_rows = (
-                session.query(NonInstantTask)
-                .filter(NonInstantTask.status == C.STATUS_WAITING)
-                .filter(NonInstantTask.next_retry_at.isnot(None))
-                .filter(NonInstantTask.next_retry_at <= now)
-                .order_by(NonInstantTask.next_retry_at.asc())
-                .limit(C.MAX_RETRY_PER_ROUND)
-                .all()
+        session.flush()
+        if cancelled != len(keys):
+            logger.warning(
+                "本轮请求取消 %d 个，CD2 确认 %d 个", len(keys), cancelled
             )
-            if not due_rows:
-                return
 
-            # 上传来自 CD2 备份任务，重试方式统一为：
-            # 让备份重新扫描源目录（BackupRestartWalkingThrough），
-            # 备份会重新比对目标端，缺失的文件就会重新上传。
-            for row in due_rows:
-                if row.retry_count >= row.max_retry:
-                    row.status = C.STATUS_FAILED
-                    row.finished_at = now
-                    row.next_retry_at = None
-                    row.error_message = "已达到最大重试次数"
-                    log_event(
-                        "warning",
-                        "scheduler",
-                        f"最终失败: {row.file_name}",
-                        detail=f"retry={row.retry_count}/{row.max_retry}",
-                    )
-                    continue
+    def watching_snapshot(self) -> list[dict]:
+        """当前待观察名单（供 API 展示）。"""
+        from .cd2_guard import get_cd2_guard
 
-                try:
-                    ok = await self._retrigger(
-                        row.file_name, row.source_path, row.dest_path
-                    )
-                except CD2Error as exc:
-                    ok = False
-                    row.error_message = str(exc)
+        return get_cd2_guard().snapshot()
 
-                row.retry_count += 1
-                row.last_retry_at = now
-                if ok:
-                    row.status = C.STATUS_RETRYING
-                    row.attempt_seen_at = now
-                    row.next_retry_at = None
-                    logger.info(
-                        "已触发备份重扫: %s（第 %d/%d 次重试）",
-                        row.file_name, row.retry_count, row.max_retry,
-                    )
-                else:
-                    if row.retry_count >= row.max_retry:
-                        row.status = C.STATUS_FAILED
-                        row.finished_at = now
-                        row.next_retry_at = None
-                        row.error_message = "无法重新触发上传且已达最大次数"
-                        log_event(
-                            "warning",
-                            "scheduler",
-                            f"最终失败（无法重新触发）: {row.file_name}",
-                            detail=row.source_path,
-                        )
-                    else:
-                        row.status = C.STATUS_WAITING
-                        row.next_retry_at = now + row.retry_interval
-
-            session.flush()
-
-        # ---- 超时兜底：重试后长时间无进展则判失败 ----
-        await self._expire_stuck_retries()
-
-    async def _expire_stuck_retries(self) -> None:
-        """重试中但长时间没有完成的任务，按最大次数判定。"""
-        now = utcnow_ts()
-        with session_scope() as session:
-            rows = (
-                session.query(NonInstantTask)
-                .filter(NonInstantTask.status == C.STATUS_RETRYING)
-                .filter(NonInstantTask.attempt_seen_at.isnot(None))
-                .all()
-            )
-            for row in rows:
-                started = row.attempt_seen_at or now
-                # 给本轮一个宽松上限：阈值 × 2 + 60s
-                limit = row.timeout_threshold * 2 + 60
-                if now - started <= limit:
-                    continue
-
-                if row.retry_count >= row.max_retry:
-                    row.status = C.STATUS_FAILED
-                    row.finished_at = now
-                    row.next_retry_at = None
-                    row.error_message = "重试未完成且已达最大次数"
-                    log_event(
-                        "warning",
-                        "scheduler",
-                        f"最终失败: {row.file_name}",
-                        detail=(
-                            f"retry={row.retry_count}/{row.max_retry} "
-                            f"elapsed={now - started:.0f}s"
-                        ),
-                    )
-                else:
-                    row.status = C.STATUS_WAITING
-                    row.next_retry_at = now + row.retry_interval
-                    row.attempt_seen_at = None
-                    logger.info(
-                        "重试未完成，排队下一轮: %s（%d/%d）",
-                        row.file_name, row.retry_count, row.max_retry,
-                    )
-
-    # ======================================================================
-    # 115 云下载清理
-    # ======================================================================
     async def reap_p115_offline(self) -> None:
         """拉取云下载列表，超过阈值的未完成任务自动取消。"""
         now = utcnow_ts()

@@ -61,68 +61,6 @@ def simulate_effective_transfer_time(total: float, queued: float) -> float:
     return max(0.0, total - queued)
 
 
-def test_queue_time_not_counted():
-    """核心场景：排队 30 分钟、真正传输 10 秒，阈值 60 秒 → 不应超时。"""
-    total = 30 * 60 + 10
-    queued = 30 * 60
-    effective = simulate_effective_transfer_time(total, queued)
-    assert effective == 10
-    assert effective <= 60, "排队时间不应计入超时"
-    print(f"✓ 排队 {queued}s + 传输 {effective}s → 未超时")
-
-
-def test_real_slow_upload_still_detected():
-    """真正传输很慢的任务仍需被判定超时。"""
-    total = 30 * 60 + 300
-    queued = 30 * 60
-    effective = simulate_effective_transfer_time(total, queued)
-    assert effective == 300
-    assert effective > 60, "真实传输超阈值应判超时"
-    print(f"✓ 传输 {effective}s > 阈值 60s → 判定超时")
-
-
-def test_no_queue_means_total_equals_effective():
-    """没有排队时，有效耗时等于总耗时。"""
-    assert simulate_effective_transfer_time(120, 0) == 120
-    print("✓ 无排队时总耗时即有效耗时")
-
-
-def test_queued_longer_than_total_is_clamped():
-    """累积排队时有浮点误差，不能出现负数耗时。"""
-    assert simulate_effective_transfer_time(100, 101) == 0.0
-    print("✓ 有效耗时不出现负数")
-
-
-def test_queued_state_visible_in_list():
-    """排队中的任务必须在实时列表里展示（否则用户以为任务丢了）。"""
-    src = (Path(__file__).resolve().parent.parent / "app" / "api" / "tasks.py").read_text(
-        encoding="utf-8"
-    )
-    assert '"queued"' in src, "实时列表查询应包含 queued 状态"
-    print("✓ 实时列表包含排队状态")
-
-
-def test_scheduler_does_not_use_old_active_set():
-    """调度器不应再用 CD2_STATUS_ACTIVE 做超时判定。"""
-    src = (
-        Path(__file__).resolve().parent.parent
-        / "app"
-        / "services"
-        / "scheduler.py"
-    ).read_text(encoding="utf-8")
-
-    # 超时判定必须基于 TRANSFERRING
-    assert "CD2_STATUS_TRANSFERRING" in src, "超时判定应使用 TRANSFERRING"
-    assert "CD2_STATUS_QUEUED" in src, "应识别排队状态"
-
-    # 不允许出现 "status_enum in C.CD2_STATUS_ACTIVE and elapsed >" 这种旧写法
-    import re
-
-    bad = re.search(r"in C\.CD2_STATUS_ACTIVE\s+and\s+elapsed\s*>", src)
-    assert bad is None, "仍存在用 ACTIVE 集合判超时的旧代码"
-    print("✓ 调度器已改为基于 TRANSFERRING 判定")
-
-
 def test_default_cd2_port_is_19798():
     """CD2 的核心服务端口（含 gRPC）是 19798，不是 19799。
 

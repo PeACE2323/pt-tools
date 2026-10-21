@@ -23,7 +23,7 @@ SUITES = [
     "test_backup.py",
     "test_cd2_diag.py",
     "test_timeout_logic.py",
-    "test_cd2_guard.py",
+    "test_cd2_guard_v4.py",
     "test_health.py",
     "test_pt_python.py",
     "test_pt_baseline.py",

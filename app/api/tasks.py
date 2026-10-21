@@ -31,6 +31,26 @@ router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 
 # ===========================================================================
+# CD2 守卫：待观察名单
+# ===========================================================================
+@router.get("/watching", summary="待观察名单（有上传速度、正在计数的任务）")
+def list_watching() -> list[dict]:
+    """返回当前被观察的任务。
+
+    判定逻辑在 ``services/cd2_guard.py``：每 30 秒轮询一次，
+    有上传速度的任务进入名单，连续两次仍在名单上即自动取消。
+    这里只做展示，不改变任何状态。
+    """
+    from ..services.scheduler import get_scheduler
+
+    try:
+        return get_scheduler().watching_snapshot()
+    except Exception as exc:  # noqa: BLE001 - 纯展示接口，失败返回空
+        logger.debug("读取待观察名单失败: %s", exc)
+        return []
+
+
+# ===========================================================================
 # 实时上传任务
 # ===========================================================================
 @router.get(
