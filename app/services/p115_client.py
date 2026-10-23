@@ -31,7 +31,6 @@ from ..config import (
     COOKIE_FILE,
     P115_CLOUDDOWNLOAD_HOST,
     P115_FAILED_STATUS,
-    P115_FINISHED_STATUS,
     P115_LIXIAN_HOST,
     P115_REMOVED_STATUS,
     P115_ST_CANCELLED,
@@ -88,17 +87,28 @@ class OfflineTask:
     def normalized_status(self) -> str:
         """归一化状态。
 
-        判定顺序刻意如此：先看进度（percentDone >= 99.9 视为完成），
-        再看原始 status 集合。原因是 115 的 status 数值语义在社区资料中
-        不一致（有资料称 2=完成，也有实测 -1 表示已删除），
-        而 percentDone 语义稳定。
+        **以进度为准，status 只用来识别明确的失败/删除态。**
+
+        为什么不优先用 status：115 的 status 数值语义在社区资料里
+        互相矛盾（有说 2=完成，也有说 2=下载中）。曾经的实现把
+        ``status in {2, 11}`` 直接当作「已完成」，结果正在下载的任务
+        （进度 0%、99%）全被标成已完成，超时监控因此完全失效。
+
+        现在的判断顺序：
+
+        1. status 命中「已删除」集合 → removed
+        2. status 命中「失败」集合   → failed
+        3. 进度 ≥ 99.9%              → finished
+        4. 有进度但未满             → downloading
+        5. 完全没有进度             → waiting（刚加入队列、尚未开始）
         """
         if self.status in P115_REMOVED_STATUS:
             return P115_ST_REMOVED
-        if self.percent_done >= 99.9 or self.status in P115_FINISHED_STATUS:
-            return P115_ST_FINISHED
         if self.status in P115_FAILED_STATUS:
             return P115_ST_FAILED
+        # 只有进度真正走完才算完成
+        if self.percent_done >= 99.9:
+            return P115_ST_FINISHED
         if self.percent_done > 0:
             return P115_ST_DOWNLOADING
         return P115_ST_WAITING

@@ -27,6 +27,7 @@ SUITES = [
     "test_health.py",
     "test_pt_python.py",
     "test_pt_baseline.py",
+    "test_p115_status.py",
 ]
 
 

@@ -138,13 +138,21 @@ P115_ST_FAILED = "failed"
 P115_ST_CANCELLED = "cancelled"
 P115_ST_REMOVED = "removed"
 
-# 115 原始 status 中视为“已完成”的集合（待运行期实测校准）
-P115_FINISHED_STATUS = {2, 11}
+# 115 原始 status 中视为“已完成”的集合
+#
+# **不要用 status 判定完成**：115 的 status 数值语义在社区资料里
+# 说法互相矛盾（有说 2=完成，也有说 2=下载中），实测发现把 status
+# 当作完成依据会导致「正在下载的任务被显示成已完成」。
+# 这里保留常量仅供排查参考，归一化逻辑以 percentDone 为准。
+P115_FINISHED_STATUS: set[int] = set()
 # 115 原始 status 中视为“任务已消失/已删除”的集合
 P115_REMOVED_STATUS = {-1, 1}
 
 # p115client 云下载列表 stat 参数：0=全部 9=失败 11=完成 12=进行中
 P115_STAT_ALL = 0
+P115_STAT_FAILED = 9
+P115_STAT_FINISHED = 11
+P115_STAT_RUNNING = 12
 
 # 115 原始 status 中视为“失败”的集合（stat=9 对应“已失败”）
 P115_FAILED_STATUS = {9}

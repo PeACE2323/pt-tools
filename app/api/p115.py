@@ -50,11 +50,45 @@ def list_offline(session: Session = Depends(db_session)) -> list[OfflineTaskOut]
         age = max(0.0, now - row.add_time) if row.add_time else 0.0
         item.age_sec = age
         # 只有“未结束”的任务才可能被判超时
-        item.over_threshold = (
-            row.normalized_status not in _TERMINAL_STATUSES and age > threshold
-        )
+        terminal = row.normalized_status in _TERMINAL_STATUSES
+        item.is_terminal = terminal
+        item.over_threshold = (not terminal) and age > threshold
         result.append(item)
     return result
+
+
+@router.get(
+    "/debug/offline-raw",
+    summary="诊断：查看 115 云下载的原始状态码与进度",
+)
+async def debug_offline_raw(
+    p115=Depends(p115_client),
+) -> dict[str, object]:
+    """拉取一次 115 任务列表，返回原始字段。
+
+    排查「下载中的任务显示成已完成」时用：这里同时给出 115 返回的
+    原始 ``status`` 与 ``percentDone``，以及本系统归一化后的结果，
+    能直接看出是哪一步判断错了。
+    """
+    try:
+        tasks = await p115.list_offline_tasks(page_size=50)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc), "tasks": []}
+
+    items = []
+    for t in tasks[:50]:
+        items.append(
+            {
+                "name": t.name,
+                "info_hash": t.info_hash,
+                "raw_status": t.status,
+                "percent_done": round(t.percent_done, 2),
+                "normalized": t.normalized_status,
+                "is_terminal": t.is_terminal,
+                "add_time": t.add_time,
+            }
+        )
+    return {"ok": True, "count": len(tasks), "tasks": items}
 
 
 @router.post(

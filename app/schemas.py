@@ -242,6 +242,9 @@ class OfflineTaskOut(ORMModel):
     # 派生字段
     age_sec: float = 0.0
     over_threshold: bool = False
+    #: 是否已结束（完成 / 失败 / 已删除 / 已取消）。
+    #: 前端据此隐藏「取消任务」—— 已结束的任务没有可中断的传输。
+    is_terminal: bool = False
 
 
 class CancelLogOut(ORMModel):

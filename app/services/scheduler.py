@@ -407,7 +407,29 @@ class GuardScheduler:
             return
 
         try:
+            # 先拉「进行中」的任务，再补充全部。
+            #
+            # 为什么分两次：115 的「全部」列表按添加时间倒序，完成记录
+            # 会大量堆积（实测几百上千条），进行中的任务很容易被挤到
+            # 后面几页甚至翻不到。分两次拉能保证「下载中」的一定被看到
+            # —— 而超时清理恰恰只关心这部分。
+            running: list = []
+            try:
+                running = await self.p115.list_offline_tasks(
+                    page_size=page_size, stat=C.P115_STAT_RUNNING
+                )
+            except P115Error as exc:
+                logger.debug("拉取「进行中」任务失败（回退到全部）: %s", exc)
+
             tasks = await self.p115.list_offline_tasks(page_size=page_size)
+
+            # 合并去重：以 info_hash 为键，进行中的优先保留
+            merged: dict[str, object] = {}
+            for t in tasks:
+                merged[t.info_hash] = t
+            for t in running:
+                merged[t.info_hash] = t
+            tasks = list(merged.values())
         except P115AuthExpired as exc:
             self.stats["p115_last_ok"] = False
             self.stats["p115_last_error"] = str(exc)
