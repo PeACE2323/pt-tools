@@ -204,12 +204,18 @@ def test_offline_task_status():
     t2 = OfflineTask("h2", "n", 1, 0, 0, 50.0)
     assert t2.normalized_status == "downloading"
     assert not t2.is_terminal
-    # 进度 0 → 等待
+    # 进度 99 → 仍是下载中（99% 未完成，需参与超时判定）
+    t99 = OfflineTask("h99", "n", 1, 0, 1, 99.0)
+    assert t99.normalized_status == "downloading"
+    assert not t99.is_terminal
+    # 进度 0 → 下载中（未完成，参与超时判定）
     t3 = OfflineTask("h3", "n", 1, 0, 0, 0.0)
-    assert t3.normalized_status == "waiting"
-    # status=-1 → 已删除
-    t4 = OfflineTask("h4", "n", 1, 0, -1, 0.0)
-    assert t4.normalized_status == "removed"
+    assert t3.normalized_status == "downloading"
+    assert not t3.is_terminal
+    # status=9 → 失败
+    t5 = OfflineTask("h5", "n", 1, 0, 9, 30.0)
+    assert t5.normalized_status == "failed"
+    assert t5.is_terminal
     print("✓ 115 任务状态归一化")
 
 

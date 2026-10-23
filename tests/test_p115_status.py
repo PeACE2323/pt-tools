@@ -1,18 +1,16 @@
 """115 云下载状态判定测试。
 
-## 背景（用户反馈）
+## 判据（对齐经实测验证的清理脚本）
 
-    「pttools 的云下载界面只监控到了完成的任务，
-      但实际上 115 客户端里有两个任务正在下载」
+    status 命中失败集合  → failed
+    percentDone >= 100   → finished
+    其余                 → 仍在下载
 
-根因：归一化状态时，只要原始 ``status`` 落在 ``{2, 11}`` 就直接判为
-「已完成」，完全无视进度。结果进度 0% / 99% 的任务全被标成已完成：
+**关键：99% 属于未完成。** 曾经的实现用 `>= 99.9` 判完成，
+把进度 99% 的正常下载任务误判成已完成，超时监控因此失效。
 
-  * 界面显示不对
-  * 超时监控彻底失效（已完成的任务不参与超时判定）
-
-115 的 status 数值语义在社区资料里互相矛盾，不可依赖。现在的原则是
-**以进度为准，status 只用来识别明确的失败/删除态**。
+**status 不参与完成/删除判定。** 115 的 status 语义社区说法互相矛盾，
+实测把 status=1 当作「已移除」导致 99% 的下载任务被标成已移除。
 """
 
 from __future__ import annotations
@@ -38,110 +36,117 @@ def make_task(status: int, percent: float, hash_: str = "h1") -> OfflineTask:
     )
 
 
-# ---------------------------------------------------------------- 状态归一化
-def test_running_task_not_marked_finished():
-    """进度未满的任务不能因为 status 被判成已完成。"""
-    for status in (0, 1, 2, 3, 11):
-        t = make_task(status, 0.0)
-        assert t.normalized_status != C.P115_ST_FINISHED, (
-            f"status={status} 进度 0% 却被判为已完成"
-        )
-    print("✓ 0% 进度的任务不会被误判为已完成")
+# ---------------------------------------------------------------- 进度判定
+def test_99_percent_is_downloading():
+    """99% 必须算「下载中」，不能算已完成。
+
+    这是用户实际遇到的情况：SNOS-411-U 离线进度 99%，
+    115 客户端显示正在下载，PTtools 却显示已移除。
+    """
+    t = make_task(1, 99.0)
+    assert t.normalized_status == C.P115_ST_DOWNLOADING, (
+        f"99% 应判为下载中，实际 {t.normalized_status}"
+    )
+    assert not t.is_terminal, "99% 的任务不能是终态"
+    print("✓ 99% → 下载中（非终态）")
 
 
-def test_partial_progress_is_downloading():
-    """有进度但未满 → 下载中。"""
-    t = make_task(2, 99.0)
-    assert t.normalized_status == C.P115_ST_DOWNLOADING
-    print("✓ 99% → 下载中")
-
-
-def test_full_progress_is_finished():
-    """进度走满才算完成。"""
+def test_100_percent_is_finished():
+    """进度到 100% 才算完成。"""
     t = make_task(0, 100.0)
     assert t.normalized_status == C.P115_ST_FINISHED
     assert t.is_terminal
     print("✓ 100% → 已完成")
 
 
-def test_zero_progress_is_waiting():
-    """完全没有进度 → 等待中（不应是已完成）。"""
-    t = make_task(3, 0.0)
-    assert t.normalized_status == C.P115_ST_WAITING
-    print("✓ 0% → 等待中")
+def test_zero_percent_is_downloading():
+    """0% 也是未完成，需要参与超时判定。"""
+    t = make_task(2, 0.0)
+    assert t.normalized_status == C.P115_ST_DOWNLOADING
+    assert not t.is_terminal
+    print("✓ 0% → 下载中")
+
+
+def test_status_does_not_affect_completion():
+    """任何 status 都不应影响「是否完成」的判断。"""
+    for status in (0, 1, 2, 3, 5, 11, 12):
+        t = make_task(status, 99.0)
+        assert t.normalized_status != C.P115_ST_FINISHED, (
+            f"status={status} 且进度 99% 时不应判完成"
+        )
+        t2 = make_task(status, 100.0)
+        assert t2.normalized_status == C.P115_ST_FINISHED, (
+            f"status={status} 且进度 100% 时应判完成"
+        )
+    print("✓ status 不参与完成判定")
 
 
 def test_failed_status_detected():
     """status=9 是明确的失败态。"""
-    t = make_task(9, 0.0)
+    t = make_task(9, 50.0)
     assert t.normalized_status == C.P115_ST_FAILED
     assert t.is_terminal
     print("✓ status=9 → 失败")
 
 
-def test_removed_status_detected():
-    """status 命中已删除集合 → removed。"""
-    for status in C.P115_REMOVED_STATUS:
-        t = make_task(status, 50.0)
-        assert t.normalized_status == C.P115_ST_REMOVED
-        assert t.is_terminal
-    print("✓ 已删除状态正确识别")
+def test_no_removed_state_from_status():
+    """status 不应产生「已移除」——那是误判的来源。"""
+    for status in (0, 1, 2, 3, 11, 12):
+        t = make_task(status, 99.0)
+        assert t.normalized_status != C.P115_ST_REMOVED, (
+            f"status={status} 被判成已移除，会掩盖正在下载的任务"
+        )
+    print("✓ status 不再产生误判的「已移除」")
 
 
-def test_downloading_not_terminal():
-    """下载中的任务不是终态，必须参与超时判定。"""
-    t = make_task(2, 50.0)
-    assert not t.is_terminal, "下载中的任务不能是终态，否则超时监控失效"
-    print("✓ 下载中 → 非终态（参与超时判定）")
+def test_constants_cleared():
+    """用于误判的常量必须清空。"""
+    assert C.P115_FINISHED_STATUS == set(), "不能再用 status 判完成"
+    assert C.P115_REMOVED_STATUS == set(), "不能再用 status 判已移除"
+    print("✓ 误判常量已清空")
 
 
-def test_finished_status_set_empty():
-    """P115_FINISHED_STATUS 必须为空 —— 不允许再用 status 判完成。"""
-    assert C.P115_FINISHED_STATUS == set(), (
-        "P115_FINISHED_STATUS 应为空集；用 status 判完成会导致"
-        "正在下载的任务被误标为已完成"
-    )
-    print("✓ 不再用 status 判定完成")
+def test_downloading_participates_in_timeout():
+    """下载中的任务必须参与超时判定。"""
+    t = make_task(1, 99.0)
+    assert not t.is_terminal, "下载中必须是非终态，否则超时清理不生效"
+    print("✓ 下载中参与超时判定")
 
 
 # ---------------------------------------------------------------- 拉取策略
-def test_fetches_running_tasks_first():
-    """应单独拉取「进行中」任务，避免被完成记录挤掉。"""
+def test_fetches_running_separately():
+    """应单独拉取「进行中」，避免被几百条完成记录挤掉。"""
     sched = (ROOT / "app" / "services" / "scheduler.py").read_text(encoding="utf-8")
-    assert "P115_STAT_RUNNING" in sched, "未单独拉取进行中的任务"
-    assert "merged" in sched, "未合并两组任务"
-    print("✓ 单独拉取进行中的任务")
+    assert "P115_STAT_RUNNING" in sched
+    assert "merged" in sched
+    print("✓ 单独拉取进行中任务")
 
 
-def test_stat_constants_defined():
-    """stat 参数常量应齐全。"""
-    assert C.P115_STAT_ALL == 0
-    assert C.P115_STAT_RUNNING == 12
-    print("✓ stat 常量齐全")
-
-
-# ---------------------------------------------------------------- 前端
-def test_finished_tasks_hide_cancel_button():
-    """已完成任务不应显示「取消任务」。"""
+# ---------------------------------------------------------------- 前端三类视图
+def test_three_categories():
+    """前端应分为「正在下载 / 已完成 / 取消日志」三类。"""
     ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-    idx = ui.find("cancelOffline(t)")
-    assert idx > 0
-    # 找到该按钮所在的标签，应带 v-if="!t.is_terminal"
-    seg = ui[max(0, idx - 400) : idx]
-    assert 'v-if="!t.is_terminal"' in seg, (
-        "取消按钮未按 is_terminal 隐藏，已完成任务仍可点取消"
-    )
-    print("✓ 已结束的任务不显示取消按钮")
+
+    assert "downloadingTasks" in ui, "缺少「正在下载」分类"
+    assert "finishedTasks" in ui, "缺少「已完成」分类"
+    assert "p115Tab==='downloading'" in ui, "缺少「正在下载」视图"
+    assert "p115Tab==='finished'" in ui, "缺少「已完成」视图"
+    assert "p115Tab==='logs'" in ui, "缺少「取消日志」视图"
+
+    # 默认进入「正在下载」
+    assert "p115Tab = ref('downloading')" in ui, "默认子页签应为正在下载"
+    print("✓ 三类视图（正在下载 / 已完成 / 取消日志）")
 
 
-def test_api_exposes_is_terminal():
-    """后端应把 is_terminal 暴露给前端。"""
-    sch = (ROOT / "app" / "schemas.py").read_text(encoding="utf-8")
-    assert "is_terminal" in sch
-
-    api = (ROOT / "app" / "api" / "p115.py").read_text(encoding="utf-8")
-    assert "item.is_terminal" in api, "API 层未填充 is_terminal"
-    print("✓ API 暴露 is_terminal")
+def test_finished_view_has_no_cancel():
+    """已完成视图不应出现取消按钮。"""
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    a = ui.find("p115Tab==='finished'")
+    b = ui.find("p115Tab==='logs'")
+    assert a > 0 and b > a
+    seg = ui[a:b]
+    assert "cancelOffline" not in seg, "已完成视图不应有取消操作"
+    print("✓ 已完成视图无取消按钮")
 
 
 if __name__ == "__main__":

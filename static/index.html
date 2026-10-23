@@ -618,9 +618,14 @@
           </button>
         </div>
 
-        <div v-if="p115Tab==='list'" class="space-y-3">
-          <div class="flex justify-end">
-            <button @click="refreshOffline()" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-sm">
+        <!-- 正在下载 -->
+        <div v-if="p115Tab==='downloading'" class="space-y-3">
+          <div class="flex items-center justify-between">
+            <p class="text-xs text-slate-500">
+              只列出<strong>未完成</strong>的任务（含 0% 与 99%）。
+              超过阈值会被自动取消，这是超时清理的唯一目标。
+            </p>
+            <button @click="refreshOffline()" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-sm shrink-0">
               立即刷新列表
             </button>
           </div>
@@ -636,7 +641,7 @@
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="t in offlineTasks" :key="t.id"
+                <tr v-for="t in downloadingTasks" :key="t.id"
                     :class="['border-t border-slate-100', t.over_threshold?'bg-rose-50/50':'']">
                   <td class="px-4 py-2.5">
                     <div class="font-medium max-w-[22rem] truncate" :title="t.name">{{ t.name || '(无名称)' }}</div>
@@ -651,15 +656,54 @@
                   <td class="px-4 py-2.5 text-right mono text-xs">{{ t.percent_done.toFixed(1) }}%</td>
                   <td class="px-4 py-2.5 text-right mono text-xs">{{ fmtDur(t.age_sec) }}</td>
                   <td class="px-4 py-2.5 text-right">
-                    <!-- 已完成/失败的任务没有可中断的传输，不该显示「取消」。
-                         只对仍在进行中的任务提供取消操作。 -->
-                    <button v-if="!t.is_terminal" @click="cancelOffline(t)"
+                    <button @click="cancelOffline(t)"
                       class="text-rose-600 hover:underline text-xs">取消任务</button>
-                    <span v-else class="text-slate-300 text-xs">—</span>
                   </td>
                 </tr>
-                <tr v-if="!offlineTasks.length">
-                  <td colspan="5" class="px-4 py-10 text-center text-slate-400 text-sm">暂无云下载任务</td>
+                <tr v-if="!downloadingTasks.length">
+                  <td colspan="5" class="px-4 py-10 text-center text-slate-400 text-sm">当前没有下载中的任务</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 已完成 -->
+        <div v-if="p115Tab==='finished'" class="space-y-3">
+          <div class="flex items-center justify-between">
+            <p class="text-xs text-slate-500">
+              进度已到 100% 的任务。它们不参与超时判定，也不提供取消操作。
+            </p>
+            <button @click="refreshOffline()" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-sm shrink-0">
+              立即刷新列表
+            </button>
+          </div>
+          <div class="bg-white rounded-lg border border-slate-200 overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+                <tr>
+                  <th class="px-4 py-2.5 text-left">任务名</th>
+                  <th class="px-4 py-2.5 text-left">状态</th>
+                  <th class="px-4 py-2.5 text-right">进度</th>
+                  <th class="px-4 py-2.5 text-right">驻留时长</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="t in finishedTasks" :key="t.id" class="border-t border-slate-100">
+                  <td class="px-4 py-2.5">
+                    <div class="font-medium max-w-[22rem] truncate" :title="t.name">{{ t.name || '(无名称)' }}</div>
+                    <div class="text-[10px] text-slate-400 mono truncate">{{ t.info_hash }}</div>
+                  </td>
+                  <td class="px-4 py-2.5">
+                    <span :class="['text-[11px] px-1.5 py-0.5 rounded', p115StatusClass(t.normalized_status)]">
+                      {{ p115StatusLabel(t.normalized_status) }}
+                    </span>
+                  </td>
+                  <td class="px-4 py-2.5 text-right mono text-xs">{{ t.percent_done.toFixed(1) }}%</td>
+                  <td class="px-4 py-2.5 text-right mono text-xs">{{ fmtDur(t.age_sec) }}</td>
+                </tr>
+                <tr v-if="!finishedTasks.length">
+                  <td colspan="4" class="px-4 py-10 text-center text-slate-400 text-sm">暂无已完成的任务</td>
                 </tr>
               </tbody>
             </table>
@@ -1647,7 +1691,7 @@ createApp({
     });
 
     const taskTab = ref('rules');
-    const p115Tab = ref('list');
+    const p115Tab = ref('downloading');
     const retryQuery = ref('');
     const retryStatus = ref('');
     const selectedRetry = ref([]);
@@ -1712,6 +1756,18 @@ createApp({
       waiting:'bg-slate-100 text-slate-600', downloading:'bg-sky-100 text-sky-700',
       finished:'bg-emerald-100 text-emerald-700', failed:'bg-rose-100 text-rose-700',
       cancelled:'bg-amber-100 text-amber-700', removed:'bg-slate-200 text-slate-500'}[s] || 'bg-slate-100');
+
+    // ---- 115 任务分类 ----
+    // 对齐 115 客户端的三个分组：
+    //   正在下载 = 未完成（含 0% 与 99%），是超时清理的目标
+    //   已完成   = 进度走到 100%
+    // 这样用户一眼就能看出哪些任务正在跑。
+    const downloadingTasks = computed(() =>
+      (offlineTasks.value || []).filter(t => !t.is_terminal)
+    );
+    const finishedTasks = computed(() =>
+      (offlineTasks.value || []).filter(t => t.is_terminal)
+    );
 
     // ---------- 载入 ----------
     const loadDashboard = async () => {
@@ -2274,7 +2330,7 @@ createApp({
         return TASK_SUB_KEYS.includes(sub) ? sub : '';
       }
       if (mainKey === 'p115') {
-        return ['list', 'logs'].includes(sub) ? sub : '';
+        return ['downloading', 'finished', 'logs'].includes(sub) ? sub : '';
       }
       return '';
     };
@@ -2284,7 +2340,7 @@ createApp({
       let target = `#${key}`;
       if (key === 'tasks' && taskTab.value !== 'live') {
         target = `#tasks/${taskTab.value}`;
-      } else if (key === 'p115' && p115Tab.value !== 'list') {
+      } else if (key === 'p115' && p115Tab.value !== 'downloading') {
         target = `#p115/${p115Tab.value}`;
       }
       if (location.hash !== target) {
@@ -2658,10 +2714,14 @@ createApp({
         { key: 'cancelled', label: '已取消',   count: s.cancelled_retry ?? 0, cls: 'text-slate-500' },
       ];
     });
-    const p115SubTabs = [
-      { key: 'list', label: '任务列表' },
+    // 115 云下载的子页签，对齐 115 客户端的分组方式：
+    //   「正在下载」是唯一需要关注的 —— 超时清理只针对它们；
+    //   「已完成」纯查阅，不提供取消操作。
+    const p115SubTabs = computed(() => [
+      { key: 'downloading', label: `正在下载 ${downloadingTasks.length}` },
+      { key: 'finished', label: `已完成 ${finishedTasks.length}` },
       { key: 'logs', label: '取消日志' },
-    ];
+    ]);
     const thresholdHours = computed({
       get: () => Math.round((form.p115_timeout_threshold / 3600) * 10) / 10,
       set: (v) => { form.p115_timeout_threshold = Math.max(1, Number(v)) * 3600; },
@@ -2783,6 +2843,7 @@ body = '''
       addFolder, removeFolder, toggleFolder, saveFolders, loadWatching,
       nonInstantPage, offlineTasks, cancelLogsPage,
       events, settings, form, p115Config, taskTab, p115Tab, taskSubTabs, p115SubTabs,
+      downloadingTasks, finishedTasks,
       switchTaskTab, switchP115Tab,
       logLevel, logLevels, logAutoRefresh, logLevelLabel, logLevelClass,
       pt, clients, policies, ptCards, ptTesting, ptReady,

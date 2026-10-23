@@ -140,13 +140,14 @@ P115_ST_REMOVED = "removed"
 
 # 115 原始 status 中视为“已完成”的集合
 #
-# **不要用 status 判定完成**：115 的 status 数值语义在社区资料里
-# 说法互相矛盾（有说 2=完成，也有说 2=下载中），实测发现把 status
-# 当作完成依据会导致「正在下载的任务被显示成已完成」。
-# 这里保留常量仅供排查参考，归一化逻辑以 percentDone 为准。
+# **不要用 status 判定完成或删除**：115 的 status 数值语义在社区资料里
+# 说法互相矛盾，实测也不可靠 —— 曾把 status=1 当作「已移除」，结果
+# 一个进度 99% 的正常下载任务被判成已移除，超时监控完全失效。
+#
+# 判定一律以 percentDone 为准（见 OfflineTask.normalized_status）。
 P115_FINISHED_STATUS: set[int] = set()
-# 115 原始 status 中视为“任务已消失/已删除”的集合
-P115_REMOVED_STATUS = {-1, 1}
+#: 不再使用（保留常量仅为兼容旧引用）。status 不参与「已删除」判定。
+P115_REMOVED_STATUS: set[int] = set()
 
 # p115client 云下载列表 stat 参数：0=全部 9=失败 11=完成 12=进行中
 P115_STAT_ALL = 0
@@ -154,7 +155,10 @@ P115_STAT_FAILED = 9
 P115_STAT_FINISHED = 11
 P115_STAT_RUNNING = 12
 
-# 115 原始 status 中视为“失败”的集合（stat=9 对应“已失败”）
+#: 115 原始 status 中视为“失败”的集合（stat=9 对应“已失败”）
+#:
+#: 唯一保留的 status 判据：失败态是明确的，且进度必然停在中间，
+#: 用进度无法与「正在下载但卡住」区分。
 P115_FAILED_STATUS = {9}
 
 # 115 云下载列表接口基地址（clouddownload.115.com 为主，lixian.115.com 为历史别名）

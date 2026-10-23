@@ -32,13 +32,11 @@ from ..config import (
     P115_CLOUDDOWNLOAD_HOST,
     P115_FAILED_STATUS,
     P115_LIXIAN_HOST,
-    P115_REMOVED_STATUS,
     P115_ST_CANCELLED,
     P115_ST_DOWNLOADING,
     P115_ST_FAILED,
     P115_ST_FINISHED,
     P115_ST_REMOVED,
-    P115_ST_WAITING,
     P115_STAT_ALL,
 )
 from ..utils import get_logger, log_event, utcnow_ts
@@ -87,31 +85,28 @@ class OfflineTask:
     def normalized_status(self) -> str:
         """归一化状态。
 
-        **以进度为准，status 只用来识别明确的失败/删除态。**
+        **判据只有进度，status 仅用于识别明确的失败。**
 
-        为什么不优先用 status：115 的 status 数值语义在社区资料里
-        互相矛盾（有说 2=完成，也有说 2=下载中）。曾经的实现把
-        ``status in {2, 11}`` 直接当作「已完成」，结果正在下载的任务
-        （进度 0%、99%）全被标成已完成，超时监控因此完全失效。
+        115 的 ``status`` 数值语义不可靠：社区资料互相矛盾，实测也踩过坑
+        —— 曾把 ``status=1`` 当作「已移除」，结果一个进度 99% 的正常下载
+        任务被判成已移除，超时监控完全失效。
 
-        现在的判断顺序：
+        现在对齐经实测验证的判据（与成熟的清理脚本一致）：
 
-        1. status 命中「已删除」集合 → removed
-        2. status 命中「失败」集合   → failed
-        3. 进度 ≥ 99.9%              → finished
-        4. 有进度但未满             → downloading
-        5. 完全没有进度             → waiting（刚加入队列、尚未开始）
+        1. ``status`` 命中失败集合 → failed
+        2. ``percentDone >= 100``  → finished（**99% 仍属未完成**）
+        3. 其余一律视为进行中（含 0% 的刚入队任务）
+
+        注意第 2 条：必须用 ``>= 100`` 而不是 ``>= 99.9``。
+        115 的进度是整数百分比，99% 表示还差最后一点，仍然要参与超时判定。
         """
-        if self.status in P115_REMOVED_STATUS:
-            return P115_ST_REMOVED
         if self.status in P115_FAILED_STATUS:
             return P115_ST_FAILED
-        # 只有进度真正走完才算完成
-        if self.percent_done >= 99.9:
+        if self.percent_done >= 100.0:
             return P115_ST_FINISHED
-        if self.percent_done > 0:
-            return P115_ST_DOWNLOADING
-        return P115_ST_WAITING
+        # 只要进度没到 100，就属于「未完成」——包括 0%。
+        # 这类任务都要参与超时判定，也是用户最关心要清理的对象。
+        return P115_ST_DOWNLOADING
 
     @property
     def is_finished(self) -> bool:
