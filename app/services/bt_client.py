@@ -319,22 +319,21 @@ class QBittorrentClient(BaseClient):
         )
         try:
             # 1) 全局传输信息
+            #
+            # 用 up_info_data（**本次会话**上传量）而不是 alltime_ul：
+            # alltime_ul 是全历史累计（可能几百 GB），用它做周期增量时，
+            # 一旦基线丢失就会把全部历史算进「本周期」，进度直接爆表
+            # （曾出现 121 GB / 1 GB = 12142%）。
+            #
+            # up_info_data 语义明确（qB 官方文档：Data uploaded this session），
+            # 而且客户端重启会归零，正好与「周期」的概念对齐 ——
+            # 归零时基线对齐逻辑会自然处理。
             info = await self._get("/api/v2/transfer/info") or {}
             snap.up_speed = int(info.get("up_info_speed") or 0)
             snap.up_total = int(info.get("up_info_data") or 0)
             snap.dl_speed = int(info.get("dl_info_speed") or 0)
 
-            # 2) 累计上传（alltime_ul 比 up_info_data 更接近「历史总量」）
-            try:
-                main = await self._get("/api/v2/sync/maindata") or {}
-                server = main.get("server_state") or {}
-                alltime = int(server.get("alltime_ul") or 0)
-                if alltime > 0:
-                    snap.up_total = alltime
-            except ClientError:
-                pass
-
-            # 3) 种子与连接数
+            # 2) 种子与连接数
             try:
                 torrents = await self._get("/api/v2/torrents/info") or []
                 snap.torrents = len(torrents) if isinstance(torrents, list) else 0
@@ -496,7 +495,12 @@ class TransmissionClient(BaseClient):
         try:
             stats = await self._call("session-stats")
             snap.up_speed = int(stats.get("uploadSpeed") or 0)
-            snap.up_total = int(stats.get("cumulative-stats", {}).get("uploadedBytes") or 0)
+            # 用 current-stats（本次会话）而不是 cumulative-stats（全历史）。
+            #
+            # 用全历史会导致周期增量把建种以来的总量全算进来，进度爆表。
+            # current-stats 在 Transmission 重启后归零，与「周期」语义一致。
+            cur = stats.get("current-stats") or {}
+            snap.up_total = int(cur.get("uploadedBytes") or 0)
             snap.dl_speed = int(stats.get("downloadSpeed") or 0)
             snap.torrents = int(stats.get("activeTorrentCount") or 0)
 

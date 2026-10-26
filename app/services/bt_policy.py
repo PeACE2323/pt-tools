@@ -496,7 +496,23 @@ class PolicyEngine:
             for name, base in rt.baseline.items():
                 snap = snapshots.get(name) or {}
                 current = int(snap.get("up_total") or 0)
-                used += max(0, current - base)
+                delta = max(0, current - base)
+                if delta > 0:
+                    # 单个客户端在周期内的增量不可能超过「按限速跑满」的量。
+                    # 超出说明数据源或基线异常（例如用了全历史累计字段），
+                    # 此时以物理上限为准，避免把错误数字展示给用户。
+                    rl = rt.config.limit_total
+                    if rl > 0:
+                        window_sec = max(1, parse_duration(rt.config.window))
+                        cap = int(rl * window_sec * 1.5)  # 1.5 倍余量防误杀
+                        if delta > cap:
+                            logger.warning(
+                                "客户端 %s 周期增量异常（%d 字节 > 上限 %d），"
+                                "已截断。请检查数据源是否为全历史累计字段",
+                                name, delta, cap,
+                            )
+                            delta = cap
+                used += delta
 
             rt.used = used
 
