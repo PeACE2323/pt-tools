@@ -149,6 +149,33 @@ def test_finished_view_has_no_cancel():
     print("✓ 已完成视图无取消按钮")
 
 
+def test_subtab_labels_use_computed_value():
+    """JS 里读 computed 必须写 .value，否则标签显示 undefined。
+
+    用户看到「正在下载 undefined」就是这个原因：模板里的自动解包
+    只对模板生效，在 setup() 的 JS 代码中必须显式取 .value。
+    """
+    import re
+
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    # 找出 p115SubTabs 定义块
+    idx = ui.find("const p115SubTabs = computed(")
+    assert idx > 0, "未找到 p115SubTabs"
+    end = ui.find("]);", idx)
+    block = ui[idx:end]
+
+    # 模板字符串里引用的计数必须走 .value
+    # 形如 `${downloadingTasks.value.length}`
+    refs = re.findall(r"\$\{(\w+)(\.value)?\.length\}", block)
+    assert refs, f"未找到计数引用: {block[:200]}"
+    for var, has_value in refs:
+        assert has_value, (
+            f"${{{var}.length}} 缺少 .value，会渲染成 undefined"
+        )
+    print("✓ 子页签计数使用 .value（不会显示 undefined）")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

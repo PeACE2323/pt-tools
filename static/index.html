@@ -2717,9 +2717,13 @@ createApp({
     // 115 云下载的子页签，对齐 115 客户端的分组方式：
     //   「正在下载」是唯一需要关注的 —— 超时清理只针对它们；
     //   「已完成」纯查阅，不提供取消操作。
+    //
+    // 注意：这里在 JS 里读另一个 computed，必须用 .value。
+    // 模板里的自动解包只对模板生效，JS 中漏写 .value 会得到
+    // undefined —— 之前标签显示成「正在下载 undefined」正是这个原因。
     const p115SubTabs = computed(() => [
-      { key: 'downloading', label: `正在下载 ${downloadingTasks.length}` },
-      { key: 'finished', label: `已完成 ${finishedTasks.length}` },
+      { key: 'downloading', label: `正在下载 ${downloadingTasks.value.length}` },
+      { key: 'finished', label: `已完成 ${finishedTasks.value.length}` },
       { key: 'logs', label: '取消日志' },
     ]);
     const thresholdHours = computed({
