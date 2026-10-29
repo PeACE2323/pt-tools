@@ -256,6 +256,42 @@ def test_threshold_constant():
     print("✓ 取消阈值为连续 2 次")
 
 
+# ---------------------------------------------------------------- 界面清理
+def test_rules_tab_has_no_count():
+    """「监控规则」页签不应显示数字。
+
+    一个规则里可以有多行文件夹路径，规则条数并不等于用户看到的
+    文件夹数量，显示出来只会误导。
+    """
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    idx = ui.find("const taskSubTabs")
+    assert idx > 0
+    block = ui[idx : idx + 400]
+    assert "{ key: 'rules', label: '监控规则' }" in block, (
+        "监控规则页签仍带 count 字段"
+    )
+    print("✓ 监控规则页签无数字")
+
+
+def test_cancel_retry_removed():
+    """「取消重试」已无意义（重试交给 CD2），不应再出现在界面上。"""
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    assert "batchCancelRetry" not in ui, "仍残留 batchCancelRetry"
+    assert "取消重试" not in ui, "界面上仍显示「取消重试」按钮"
+    print("✓ 已移除「取消重试」按钮")
+
+
+def test_delete_button_style_consistent():
+    """删除按钮应与批量重试按钮同样式（实心色块）。"""
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    idx = ui.find("batchDeleteRetry()")
+    assert idx > 0
+    seg = ui[idx : idx + 300]
+    assert "bg-rose-600" in seg, "删除按钮未使用实心红底样式"
+    assert "text-white" in seg, "删除按钮文字应为白色"
+    print("✓ 删除按钮与其他按钮样式统一")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

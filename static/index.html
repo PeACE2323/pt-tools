@@ -188,8 +188,8 @@
               </div>
             </div>
             <div class="mt-3 pt-3 border-t border-slate-100 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
-              <span>启用规则 <b class="text-slate-700">{{ dash.stats.enabled_rules ?? 0 }}</b>/{{ dash.stats.total_rules ?? 0 }}</span>
-              <span>已取消重试 <b class="text-slate-700">{{ dash.stats.cancelled_retry ?? 0 }}</b></span>
+              <span>监控文件夹 <b class="text-slate-700">{{ folders.length }}</b></span>
+              <span>已取消上传 <b class="text-slate-700">{{ dash.stats.cancelled_retry ?? 0 }}</b></span>
             </div>
           </div>
 
@@ -519,12 +519,8 @@
               class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white rounded-md text-sm">
               批量重试 ({{ selectedRetry.length }})
             </button>
-            <button @click="batchCancelRetry()" :disabled="!selectedRetry.length"
-              class="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white rounded-md text-sm">
-              取消重试
-            </button>
             <button @click="batchDeleteRetry()" :disabled="!selectedRetry.length"
-              class="px-3 py-1.5 text-rose-600 hover:bg-rose-50 disabled:opacity-40 rounded-md text-sm">
+              class="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-40 text-white rounded-md text-sm">
               删除
             </button>
           </div>
@@ -2506,13 +2502,6 @@ createApp({
         await Promise.all([loadNonInstant(nonInstantPage.page), loadDashboard()]);
       } catch (e) { showToast(e.message, 'error'); }
     };
-    const batchCancelRetry = async () => {
-      try {
-        const r = await api('POST', '/api/tasks/non-instant/cancel', { ids: selectedRetry.value });
-        showToast(r.message, 'success');
-        await Promise.all([loadNonInstant(nonInstantPage.page), loadDashboard()]);
-      } catch (e) { showToast(e.message, 'error'); }
-    };
     const batchDeleteRetry = async () => {
       if (!confirm(`确认删除选中的 ${selectedRetry.value.length} 条记录？`)) return;
       try {
@@ -2698,7 +2687,9 @@ createApp({
     // 任务完成后立刻消失，无法可靠地统计秒传；与其展示不完整的数据，
     // 不如只做真正可靠的事 —— 超时拦截与重试。
     const taskSubTabs = computed(() => [
-      { key: 'rules', label: '监控规则', count: rules.value.length || 0 },
+      // 「监控规则」不显示数字：现在一个规则里可以有多行文件夹路径，
+      // 规则条数并不等于用户看到的文件夹数量，显示出来只会误导。
+      { key: 'rules', label: '监控规则' },
       { key: 'retry', label: '拦截与重试', count: (dash.stats?.waiting_retry || 0) + (dash.stats?.retrying || 0) },
     ]);
 
@@ -2866,7 +2857,7 @@ body = '''
       switchTab, refreshAll, fmtDur, fmtSize, fmtTime, fmtAgo,
       statusClass, retryStatusLabel, retryStatusClass, p115StatusLabel, p115StatusClass,
       openRuleEditor, saveRule, toggleRule, deleteRule, validateKeywords,
-      toggleAllRetry, batchRetry, singleRetry, batchCancelRetry, batchDeleteRetry,
+      toggleAllRetry, batchRetry, singleRetry, batchDeleteRetry,
       deleteRetryOne, loadNonInstant,
       refreshOffline, cancelOffline, clearCancelLogs, loadCancelLogs,
       saveSettings, loadSettings, testCd2, testP115, fetchToken, loadEvents,
