@@ -292,6 +292,28 @@ def test_delete_button_style_consistent():
     print("✓ 删除按钮与其他按钮样式统一")
 
 
+def test_intercept_time_column():
+    """拦截与重试表应显示拦截时间。
+
+    用户需要知道「这个任务是什么时候被取消的」——记录里已有
+    intercepted_at，但界面原先没有展示。
+    """
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert "拦截时间" in ui, "表头缺少「拦截时间」列"
+    assert "r.intercepted_at" in ui, "未渲染 intercepted_at"
+
+    # 后端 schema 必须暴露该字段
+    sch = (ROOT / "app" / "schemas.py").read_text(encoding="utf-8")
+    idx = sch.find("class NonInstantTaskOut")
+    assert "intercepted_at" in sch[idx : idx + 900], "schema 未暴露 intercepted_at"
+
+    # 落库时必须赋值
+    sched = (ROOT / "app" / "services" / "scheduler.py").read_text(encoding="utf-8")
+    assert "intercepted_at=now" in sched, "落库时未写入拦截时间"
+    print("✓ 拦截时间列（含后端字段与写入）")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

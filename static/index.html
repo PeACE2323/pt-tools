@@ -534,9 +534,9 @@
                   </th>
                   <th class="px-3 py-2.5 text-left">文件名</th>
                   <th class="px-3 py-2.5 text-left">规则</th>
-                  <th class="px-3 py-2.5 text-center">重试</th>
+                  <th class="px-3 py-2.5 text-right">大小</th>
                   <th class="px-3 py-2.5 text-left">状态</th>
-                  <th class="px-3 py-2.5 text-left">下次重试</th>
+                  <th class="px-3 py-2.5 text-left">拦截时间</th>
                   <th class="px-3 py-2.5 text-right">操作</th>
                 </tr>
               </thead>
@@ -550,7 +550,7 @@
                     <div class="text-[11px] text-slate-400 mono truncate max-w-[16rem]" :title="r.source_path">{{ r.source_path }}</div>
                   </td>
                   <td class="px-3 py-2.5 text-xs">{{ r.rule_name || '—' }}</td>
-                  <td class="px-3 py-2.5 text-center mono text-xs">{{ r.retry_count }}/{{ r.max_retry }}</td>
+                  <td class="px-3 py-2.5 text-right mono text-xs text-slate-500">{{ fmtSize(r.size) }}</td>
                   <td class="px-3 py-2.5">
                     <span :class="['text-[11px] px-1.5 py-0.5 rounded', retryStatusClass(r.status)]">
                       {{ retryStatusLabel(r.status) }}
@@ -559,9 +559,9 @@
                       {{ r.error_message }}
                     </div>
                   </td>
-                  <td class="px-3 py-2.5 text-xs mono text-slate-500">
-                    <span v-if="r.next_retry_at">{{ fmtAgo(r.next_retry_at) }}</span>
-                    <span v-else>—</span>
+                  <td class="px-3 py-2.5 text-xs mono text-slate-500 whitespace-nowrap">
+                    <div>{{ fmtTime(r.intercepted_at) }}</div>
+                    <div class="text-[10px] text-slate-400">{{ fmtAgo(r.intercepted_at) }}</div>
                   </td>
                   <td class="px-3 py-2.5 text-right whitespace-nowrap">
                     <button @click="singleRetry(r)" class="text-emerald-600 hover:underline text-xs mr-2">立即重试</button>
