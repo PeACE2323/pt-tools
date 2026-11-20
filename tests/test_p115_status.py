@@ -341,6 +341,61 @@ def test_waiting_not_auto_cancelled():
     print("✓ 自动取消只针对服务端确认在下载的任务")
 
 
+def test_waiting_view_removed():
+    """「等待中」页签已移除。
+
+    那批任务数量既不可信（混着 115 历史记录），也没有可执行的动作，
+    摆在界面上只会误导用户，因此只保留「正在下载」和「已完成」。
+    """
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    assert "p115Tab==='waiting'" not in ui, "「等待中」视图应已删除"
+    assert "waitingTasks" not in ui, "等待中列表仍被引用"
+    assert "cancelAllWaiting" not in ui, "清理等待中函数仍被引用"
+    print("✓ 「等待中」页签已移除")
+
+
+def test_clear_completed_endpoint():
+    """已完成要支持一键清空，且只清本地快照。"""
+    api_src = (ROOT / "app" / "api" / "p115.py").read_text(encoding="utf-8")
+    idx = api_src.find('"/offline/completed"')
+    assert idx > 0, "缺少清空已完成端点"
+    assert "delete(" in api_src[max(0, idx - 120) : idx], "清空已完成应为 DELETE"
+
+    seg = api_src[idx : api_src.find("@router.post", idx)]
+    assert "_TERMINAL_STATUSES" in seg, "只应清空终态记录"
+    assert "session.delete" not in seg.replace("delete(synchronize_session", ""), (
+        "清空已完成不能删除 115 上的任务"
+    )
+
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    assert "const clearCompleted" in ui, "前端缺少 clearCompleted"
+    assert "'/api/p115/offline/completed'" in ui, "前端未调用清空端点"
+    print("✓ 已完成支持一键清空（仅本地）")
+
+
+def test_terminal_rows_follow_115():
+    """115 上删掉的记录，本地要跟着消失。
+
+    早期实现把终态记录永久保留（「完成是历史事实」），结果用户在 115
+    上删掉 1191 条完成记录后，界面还是 1191，完全是两套数据。
+    """
+    sched = (ROOT / "app" / "services" / "scheduler.py").read_text(encoding="utf-8")
+
+    assert "_TERMINAL_OFFLINE_STATUSES" in sched, "缺少终态集合"
+    anchor = "if row.normalized_status in _TERMINAL_OFFLINE_STATUSES:"
+    idx = sched.find(anchor)
+    assert idx > 0, "终态记录未参与消失判定"
+    assert "session.delete(row)" in sched[idx : idx + 200], (
+        "终态记录应被删除，而不是 continue 跳过"
+    )
+
+    # 空列表保护：接口异常返回空列表时不能把整张表清空
+    assert "if not tasks:" in sched[sched.find("# 列表里消失的任务") :], (
+        "缺少空列表保护，一次异常就会清空所有快照"
+    )
+    print("✓ 终态记录跟随 115 删除")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

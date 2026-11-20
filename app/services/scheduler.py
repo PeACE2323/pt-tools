@@ -57,6 +57,15 @@ from .webhook import enrich_tasks
 
 logger = get_logger("guard.scheduler")
 
+#: 云下载的终态：这些任务不会再变化，只作为历史记录存在。
+#: 与 API 层 ``_TERMINAL_STATUSES`` 保持一致。
+_TERMINAL_OFFLINE_STATUSES = (
+    C.P115_ST_FINISHED,
+    C.P115_ST_FAILED,
+    C.P115_ST_CANCELLED,
+    C.P115_ST_REMOVED,
+)
+
 
 # ===========================================================================
 # 规则匹配
@@ -547,30 +556,38 @@ class GuardScheduler:
                     row.normalized_status = status
                 row.last_seen_at = now
 
-        # 列表里消失的任务标记 removed
+        # 列表里消失的任务 → 删掉本地快照
         #
-        # 只在「全部」列表完整翻完时才敢判定任务消失：翻页上限之外的
-        # 任务只是本次没被看到，不是真的不存在，误判会让正常任务被标成
-        # 已移除、超时监控随之失效。
+        # 只在「全部」列表完整翻完、且这次确实拿到了数据时才敢判定：
+        # 翻页被截断说明没看全；列表为空多半是接口异常返回，此时删库
+        # 会把整张表清空。
         if not complete:
             logger.debug("「全部」列表未翻完，跳过消失判定")
             return
+        if not tasks:
+            logger.warning("「全部」列表为空，跳过消失判定（疑似接口异常）")
+            return
 
+        dropped = 0
         for info_hash, row in existing.items():
             if info_hash in seen:
                 continue
-            # 已经是终态的记录不再改动：完成/失败是历史事实，115 的历史
-            # 列表滚掉之后不该把它们改写成「已移除」，否则「已完成」会
-            # 逐渐变空、用户失去对账依据。
-            if row.normalized_status in (
-                C.P115_ST_CANCELLED,
-                C.P115_ST_REMOVED,
-                C.P115_ST_FINISHED,
-                C.P115_ST_FAILED,
-            ):
+            # 终态记录（已完成/失败/已取消/已移除）只要 115 不再返回，
+            # 就跟着删掉。用户在 115 上删掉完成记录后界面必须同步，否则
+            # 「已完成」只增不减，永远清不干净 —— 这正是之前完成数停在
+            # 1191 的原因。
+            if row.normalized_status in _TERMINAL_OFFLINE_STATUSES:
+                session.delete(row)
+                dropped += 1
                 continue
+            # 非终态（正在下载 / 等待中）给一个宽限期：可能只是这一轮
+            # 采集没翻到，不该马上判死。
             if now - row.last_seen_at > grace:
-                row.normalized_status = C.P115_ST_REMOVED
+                session.delete(row)
+                dropped += 1
+
+        if dropped:
+            logger.info("115 列表中已不存在，清理本地快照 %d 条", dropped)
 
     def _write_cancel_log(
         self,

@@ -144,6 +144,27 @@ async def cancel_offline(
     )
 
 
+@router.delete(
+    "/offline/completed",
+    response_model=ActionResult,
+    summary="清空本地「已完成」记录（只清界面，不动 115）",
+)
+def clear_completed_offline(session: Session = Depends(db_session)) -> ActionResult:
+    """删除本地快照里的终态记录。
+
+    只删本地的历史快照，**不会**去 115 删除任何离线任务或文件。
+    用于把界面上的「已完成」一次性归零；后续采集到新完成的任务会
+    重新出现。
+    """
+    count = (
+        session.query(P115OfflineTask)
+        .filter(P115OfflineTask.normalized_status.in_(_TERMINAL_STATUSES))
+        .delete(synchronize_session=False)
+    )
+    session.commit()
+    return ActionResult(affected=int(count), message=f"已清空 {count} 条已完成记录")
+
+
 @router.post(
     "/offline/restart",
     response_model=ActionResult,
