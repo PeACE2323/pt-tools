@@ -90,13 +90,21 @@ async def dashboard(
     )
     total_cancelled = session.query(func.count(P115CancelLog.id)).scalar() or 0
 
+    # 「进行中」只统计 115 服务端确认在下载的任务。
+    #
+    # 早期把 waiting 也算进来，结果历史记录里进度缺失的老任务被一并计入
+    # （实测界面 25 个、网盘只有 4 个）。waiting 现在是「在队列里但没在
+    # 下载」，单独看，不算进行中。
     offline_active = (
         session.query(func.count(P115OfflineTask.id))
-        .filter(
-            P115OfflineTask.normalized_status.in_(
-                ("waiting", "downloading", "failed")
-            )
-        )
+        .filter(P115OfflineTask.normalized_status == "downloading")
+        .scalar()
+        or 0
+    )
+
+    offline_waiting = (
+        session.query(func.count(P115OfflineTask.id))
+        .filter(P115OfflineTask.normalized_status == "waiting")
         .scalar()
         or 0
     )
@@ -116,6 +124,7 @@ async def dashboard(
         "today_cancelled_offline": int(today_cancelled),
         "total_cancelled_offline": int(total_cancelled),
         "offline_active": int(offline_active),
+        "offline_waiting": int(offline_waiting),
         "enabled_rules": int(enabled_rules),
         "total_rules": int(total_rules),
     }

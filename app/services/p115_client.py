@@ -37,7 +37,9 @@ from ..config import (
     P115_ST_FAILED,
     P115_ST_FINISHED,
     P115_ST_REMOVED,
+    P115_ST_WAITING,
     P115_STAT_ALL,
+    P115_STAT_RUNNING,
 )
 from ..utils import get_logger, log_event, utcnow_ts
 
@@ -80,18 +82,33 @@ class OfflineTask:
     del_path: str = ""
     file_id: int = 0
     raw: dict[str, Any] = field(default_factory=dict)
+    #: 由 115 **服务端**给出的归类，取值 ``downloading`` / ``waiting`` / ``""``。
+    #:
+    #: 为什么需要这个字段：115 的 ``task_lists`` 在 ``stat=0``（全部）下会
+    #: 把历史记录一并返回，其中不乏已完成、已取消但 ``percentDone`` 字段缺失
+    #: 或为 0 的老任务。仅凭 ``percentDone`` 判断必然把它们全算成「下载中」
+    #: —— 实测界面显示 25 个「正在下载」，而 115 网盘里只有 4 个。
+    #:
+    #: ``stat=12``（进行中）是 115 服务端自己的分类结果，与网页端「正在下载」
+    #: 列表同源，因此以它为准确认。为空表示本次没能拿到该分类（例如接口
+    #: 调用失败），此时回退到按进度判断。
+    stat_bucket: str = ""
 
     @property
     def normalized_status(self) -> str:
         """归一化状态。
 
-        **判据只有进度，status 仅用于识别明确的失败。**
+        **优先采用 115 服务端给出的 ``stat`` 归类**，拿不到时才回退到按
+        进度判断。
 
-        115 的 ``status`` 数值语义不可靠：社区资料互相矛盾，实测也踩过坑
-        —— 曾把 ``status=1`` 当作「已移除」，结果一个进度 99% 的正常下载
-        任务被判成已移除，超时监控完全失效。
+        服务端归类（``stat_bucket``）存在时直接返回它：
 
-        现在对齐经实测验证的判据（与成熟的清理脚本一致）：
+        * ``downloading`` —— 在 ``stat=12`` 列表里，即网页端「正在下载」
+        * ``waiting``     —— 在「全部」列表里但不在「进行中」列表里，
+          且进度未满 100%。这类任务 115 网页端不算「正在下载」（多半是
+          暂停、排队中或状态异常），但仍留在队列里。
+
+        没有任何服务端归类时的回退判据（历史实现，仅靠进度）：
 
         1. ``status`` 命中失败集合 → failed
         2. ``percentDone >= 100``  → finished（**99% 仍属未完成**）
@@ -100,6 +117,8 @@ class OfflineTask:
         注意第 2 条：必须用 ``>= 100`` 而不是 ``>= 99.9``。
         115 的进度是整数百分比，99% 表示还差最后一点，仍然要参与超时判定。
         """
+        if self.stat_bucket:
+            return self.stat_bucket
         if self.status in P115_FAILED_STATUS:
             return P115_ST_FAILED
         if self.percent_done >= 100.0:
@@ -122,12 +141,32 @@ class OfflineTask:
             P115_ST_CANCELLED,
         )
 
+    @property
+    def is_running(self) -> bool:
+        """是否真的在下载（115 服务端确认）。"""
+        return self.normalized_status == P115_ST_DOWNLOADING
+
     def age_seconds(self, now: float | None = None) -> float:
         """任务已存在时长（秒）：now - add_time。"""
         current = utcnow_ts() if now is None else now
         if self.add_time <= 0:
             return 0.0
         return max(0.0, current - self.add_time)
+
+
+@dataclass(slots=True)
+class OfflineSnapshot:
+    """一次云下载列表采集的结果。"""
+
+    tasks: list[OfflineTask] = field(default_factory=list)
+    #: 「进行中」（``stat=12``）是否采集成功。失败时不做服务端归类，
+    #: 避免把整张表都误判成「未在下载」。
+    running_ok: bool = False
+    #: 「全部」列表是否完整翻完。不完整时不能据此判定「任务已消失」，
+    #: 否则翻页上限之外的任务会被误标为已移除。
+    complete: bool = False
+    running_count: int = 0
+    total_count: int = 0
 
 
 @dataclass(slots=True)
@@ -478,17 +517,34 @@ class P115ClientWrapper:
         max_pages: int = 50,
         stat: int = P115_STAT_ALL,
     ) -> list[OfflineTask]:
-        """拉取云下载任务列表（自动翻页）。
+        """拉取云下载任务列表（自动翻页）。"""
+        tasks, _complete = await self._list_offline_tasks(
+            page_size=page_size, max_pages=max_pages, stat=stat
+        )
+        return tasks
+
+    async def _list_offline_tasks(
+        self,
+        page_size: int = 30,
+        max_pages: int = 50,
+        stat: int = P115_STAT_ALL,
+    ) -> tuple[list[OfflineTask], bool]:
+        """拉取云下载任务列表，并报告是否完整翻完。
 
         优先用封装方法 ``clouddownload_task_list``；不可用时回退到
         ``client.request`` 直连 ``?ac=task_lists``。
 
         注意：p115client 的 ``clouddownload_iter`` 里 page 从 0 开始，
         这里保持一致。
+
+        返回值第二个元素为 ``complete``：``False`` 表示因为翻页上限或
+        接口没给 ``page_count`` 而提前停止，此时列表不完整，调用方不能
+        据此判定「某个任务已经消失」。
         """
         await self.ensure_client()
         tasks: list[OfflineTask] = []
         seen: set[str] = set()
+        complete = False
 
         page = 0
         while page < max_pages:
@@ -522,15 +578,100 @@ class P115ClientWrapper:
             page_count = resp.get("page_count")
             current = resp.get("page", page)
             if not raw_tasks:
+                complete = True
                 break
             if page_count is not None and current is not None:
                 if int(current) >= int(page_count) - 1:
+                    complete = True
                     break
             page += 1
 
         self._status.task_count = len(tasks)
-        logger.debug("115 云下载任务 %d 条", len(tasks))
-        return tasks
+        logger.debug("115 云下载任务 %d 条（完整=%s）", len(tasks), complete)
+        return tasks, complete
+
+    # ------------------------------------------------------------ 采集快照
+    async def collect_offline_snapshot(
+        self,
+        page_size: int = 100,
+        max_pages: int = 50,
+    ) -> OfflineSnapshot:
+        """采集一份带服务端归类的云下载快照。
+
+        分两次请求：
+
+        1. ``stat=12``（进行中）—— 115 服务端自己的「正在下载」分类，
+           与网页端列表同源，这是唯一可信的「是否正在下载」判据。
+        2. ``stat=0``（全部）—— 用来补齐历史记录，供「已完成」等视图展示。
+
+        合并后给每个任务打上 ``stat_bucket``：
+
+        * 在进行中列表里 → ``downloading``
+        * 不在进行中列表、进度未满 100% → ``waiting``
+        * 其余交给 ``normalized_status`` 按进度判断（100% → finished，
+          status=9 → failed）
+
+        **不再把「列表里所有进度小于 100% 的任务」都当成正在下载**：
+        115 的历史记录里有大量已完成但 ``percentDone`` 缺失/为 0 的老任务，
+        按进度判断会把它们永远算成「下载中」，且因为它们一直出现在列表里，
+        ``last_seen_at`` 不断刷新，永远不会被标记为已消失 —— 这正是界面
+        显示 25 个「正在下载」而网盘实际只有 4 个的原因。
+        """
+        snapshot = OfflineSnapshot()
+
+        # 「全部」列表要尽量翻完，否则 complete=False，消失判定只能整体跳过，
+        # 已取消的任务就会永远以「下载中」的身份留在界面上。用户设置里的
+        # 页大小可能很小（默认 30），这里抬到 100，和 P115_MAX_PAGES 一起
+        # 把一次采集的上限顶到 5000 条。
+        page_size = max(int(page_size), 100)
+
+        try:
+            running, _running_complete = await self._list_offline_tasks(
+                page_size=page_size, max_pages=max_pages, stat=P115_STAT_RUNNING
+            )
+            snapshot.running_ok = True
+        except P115AuthExpired:
+            raise
+        except P115Error as exc:
+            logger.warning("拉取「进行中」任务失败，本次不做服务端归类: %s", exc)
+            running = []
+
+        tasks, complete = await self._list_offline_tasks(
+            page_size=page_size, max_pages=max_pages, stat=P115_STAT_ALL
+        )
+
+        snapshot.complete = complete
+        snapshot.running_count = len(running)
+        snapshot.total_count = len(tasks)
+
+        running_hashes = {t.info_hash for t in running}
+
+        merged: dict[str, OfflineTask] = {t.info_hash: t for t in tasks}
+        for task in running:
+            merged[task.info_hash] = task
+        tasks = list(merged.values())
+
+        if snapshot.running_ok:
+            for task in tasks:
+                if task.info_hash in running_hashes:
+                    task.stat_bucket = P115_ST_DOWNLOADING
+                elif task.percent_done >= 100.0:
+                    # 已完成：交给 normalized_status 判成 finished
+                    task.stat_bucket = ""
+                elif task.status in P115_FAILED_STATUS:
+                    task.stat_bucket = ""
+                else:
+                    # 在队列里但 115 不认为它在下载（暂停/排队/状态异常）
+                    task.stat_bucket = P115_ST_WAITING
+
+        snapshot.tasks = tasks
+        logger.debug(
+            "云下载快照：全部 %d 条，进行中 %d 条，服务端归类=%s",
+            snapshot.total_count,
+            snapshot.running_count,
+            snapshot.running_ok,
+        )
+        return snapshot
 
     async def _request_task_lists(self, page: int, page_size: int) -> dict:
         """底层回退：``client.request`` 请求 task_lists。"""

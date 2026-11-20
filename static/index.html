@@ -206,7 +206,12 @@
               </div>
               <div>
                 <div class="text-2xl font-semibold text-slate-700">{{ dash.stats.offline_active ?? 0 }}</div>
-                <div class="text-[11px] text-slate-400 mt-0.5">进行中</div>
+                <div class="text-[11px] text-slate-400 mt-0.5">
+                  下载中
+                  <span v-if="dash.stats.offline_waiting" class="text-amber-500">
+                    · 待处理 {{ dash.stats.offline_waiting }}
+                  </span>
+                </div>
               </div>
               <div>
                 <div class="text-2xl font-semibold text-amber-600">{{ dash.stats.today_cancelled_offline ?? 0 }}</div>
@@ -618,8 +623,8 @@
         <div v-if="p115Tab==='downloading'" class="space-y-3">
           <div class="flex items-center justify-between">
             <p class="text-xs text-slate-500">
-              只列出<strong>未完成</strong>的任务（含 0% 与 99%）。
-              超过阈值会被自动取消，这是超时清理的唯一目标。
+              这里只列出 <strong>115 服务端确认正在下载</strong>的任务，与网盘网页端的
+              「正在下载」一一对应。超过阈值会被自动取消，这是超时清理的唯一目标。
             </p>
             <button @click="refreshOffline()" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-sm shrink-0">
               立即刷新列表
@@ -658,6 +663,55 @@
                 </tr>
                 <tr v-if="!downloadingTasks.length">
                   <td colspan="5" class="px-4 py-10 text-center text-slate-400 text-sm">当前没有下载中的任务</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 等待中 -->
+        <div v-if="p115Tab==='waiting'" class="space-y-3">
+          <div class="flex items-start justify-between gap-3">
+            <p class="text-xs text-slate-500">
+              这些任务<strong>还在 115 的列表里</strong>，但 115 服务端没有把它们算作「正在下载」
+              —— 通常是已暂停、排队卡住，或历史记录里进度字段缺失的老任务。
+              它们不会被自动取消（避免误删历史），确认无用后可手动清理。
+            </p>
+            <button @click="cancelAllWaiting()" :disabled="p115Busy"
+              class="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white rounded-md text-sm shrink-0">
+              清理全部等待中
+            </button>
+          </div>
+          <div class="bg-white rounded-lg border border-slate-200 overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+                <tr>
+                  <th class="px-4 py-2.5 text-left">任务名</th>
+                  <th class="px-4 py-2.5 text-left">状态</th>
+                  <th class="px-4 py-2.5 text-right">进度</th>
+                  <th class="px-4 py-2.5 text-right">驻留时长</th>
+                  <th class="px-4 py-2.5 text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="t in waitingTasks" :key="t.id" class="border-t border-slate-100">
+                  <td class="px-4 py-2.5">
+                    <div class="font-medium max-w-[22rem] truncate" :title="t.name">{{ t.name || '(无名称)' }}</div>
+                    <div class="text-[10px] text-slate-400 mono truncate">{{ t.info_hash }}</div>
+                  </td>
+                  <td class="px-4 py-2.5">
+                    <span :class="['text-[11px] px-1.5 py-0.5 rounded', p115StatusClass(t.normalized_status)]">
+                      {{ p115StatusLabel(t.normalized_status) }}
+                    </span>
+                  </td>
+                  <td class="px-4 py-2.5 text-right mono text-xs">{{ t.percent_done.toFixed(1) }}%</td>
+                  <td class="px-4 py-2.5 text-right mono text-xs">{{ fmtDur(t.age_sec) }}</td>
+                  <td class="px-4 py-2.5 text-right">
+                    <button @click="cancelOffline(t)" class="text-rose-600 hover:underline text-xs">取消任务</button>
+                  </td>
+                </tr>
+                <tr v-if="!waitingTasks.length">
+                  <td colspan="5" class="px-4 py-10 text-center text-slate-400 text-sm">没有等待中的任务</td>
                 </tr>
               </tbody>
             </table>
@@ -1617,6 +1671,9 @@ createApp({
     const watching = ref([]);
     const nonInstantPage = reactive({ items: [], total: 0, page: 1, page_size: 50 });
     const offlineTasks = ref([]);
+    // 115 批量操作（清理等待中）期间禁用按钮，避免重复提交
+    const p115Busy = ref(false);
+
     const cancelLogsPage = reactive({ items: [], total: 0, page: 1, page_size: 50 });
     const events = ref([]);
     // ---- 事件日志页 ----
@@ -1754,12 +1811,20 @@ createApp({
       cancelled:'bg-amber-100 text-amber-700', removed:'bg-slate-200 text-slate-500'}[s] || 'bg-slate-100');
 
     // ---- 115 任务分类 ----
-    // 对齐 115 客户端的三个分组：
-    //   正在下载 = 未完成（含 0% 与 99%），是超时清理的目标
-    //   已完成   = 进度走到 100%
-    // 这样用户一眼就能看出哪些任务正在跑。
+    // 三个分组各自对应 115 服务端的真实状态：
+    //   正在下载 = 115 的 stat=12（「进行中」）分类，与网盘网页端一致
+    //   等待中   = 还在 115 列表里、但服务端没把它算作正在下载
+    //              （暂停 / 排队 / 状态异常），不影响超时清理
+    //   已完成   = 进度走到 100%、失败、已移除、已取消
+    //
+    // 早期实现把「进度 < 100%」全算成正在下载，结果 115 历史记录里那些
+    // 进度缺失或为 0 的老任务被永久计入，出现了「界面 25 个、网盘 4 个」
+    // 的错位。现在以服务端分类为准。
     const downloadingTasks = computed(() =>
-      (offlineTasks.value || []).filter(t => !t.is_terminal)
+      (offlineTasks.value || []).filter(t => t.normalized_status === 'downloading')
+    );
+    const waitingTasks = computed(() =>
+      (offlineTasks.value || []).filter(t => t.normalized_status === 'waiting')
     );
     const finishedTasks = computed(() =>
       (offlineTasks.value || []).filter(t => t.is_terminal)
@@ -2326,7 +2391,7 @@ createApp({
         return TASK_SUB_KEYS.includes(sub) ? sub : '';
       }
       if (mainKey === 'p115') {
-        return ['downloading', 'finished', 'logs'].includes(sub) ? sub : '';
+        return ['downloading', 'waiting', 'finished', 'logs'].includes(sub) ? sub : '';
       }
       return '';
     };
@@ -2532,6 +2597,20 @@ createApp({
         await loadOffline();
       } catch (e) { showToast(e.message, 'error'); }
     };
+    const cancelAllWaiting = async () => {
+      const list = waitingTasks.value;
+      if (!list.length) { showToast('没有等待中的任务', 'error'); return; }
+      if (!confirm(`确认清理全部 ${list.length} 个「等待中」任务？\n只移除离线任务，不删除已下载文件。`)) return;
+      p115Busy.value = true;
+      try {
+        const r = await api('POST', '/api/p115/offline/cancel', {
+          info_hashes: list.map(t => t.info_hash),
+        });
+        showToast(r.message, r.affected ? 'success' : 'error');
+        await loadOffline();
+      } catch (e) { showToast(e.message, 'error'); }
+      finally { p115Busy.value = false; }
+    };
     const clearCancelLogs = async () => {
       if (!confirm('确认清空全部取消日志？')) return;
       try {
@@ -2712,11 +2791,18 @@ createApp({
     // 注意：这里在 JS 里读另一个 computed，必须用 .value。
     // 模板里的自动解包只对模板生效，JS 中漏写 .value 会得到
     // undefined —— 之前标签显示成「正在下载 undefined」正是这个原因。
-    const p115SubTabs = computed(() => [
-      { key: 'downloading', label: `正在下载 ${downloadingTasks.value.length}` },
-      { key: 'finished', label: `已完成 ${finishedTasks.value.length}` },
-      { key: 'logs', label: '取消日志' },
-    ]);
+    const p115SubTabs = computed(() => {
+      const tabs = [
+        { key: 'downloading', label: `正在下载 ${downloadingTasks.value.length}` },
+      ];
+      // 「等待中」只在真的有这类任务时出现，避免常态空页签
+      if (waitingTasks.value.length) {
+        tabs.push({ key: 'waiting', label: `等待中 ${waitingTasks.value.length}` });
+      }
+      tabs.push({ key: 'finished', label: `已完成 ${finishedTasks.value.length}` });
+      tabs.push({ key: 'logs', label: '取消日志' });
+      return tabs;
+    });
     const thresholdHours = computed({
       get: () => Math.round((form.p115_timeout_threshold / 3600) * 10) / 10,
       set: (v) => { form.p115_timeout_threshold = Math.max(1, Number(v)) * 3600; },
@@ -2838,7 +2924,7 @@ body = '''
       addFolder, removeFolder, toggleFolder, saveFolders, loadWatching,
       nonInstantPage, offlineTasks, cancelLogsPage,
       events, settings, form, p115Config, taskTab, p115Tab, taskSubTabs, p115SubTabs,
-      downloadingTasks, finishedTasks,
+      downloadingTasks, waitingTasks, finishedTasks,
       switchTaskTab, switchP115Tab,
       logLevel, logLevels, logAutoRefresh, logLevelLabel, logLevelClass,
       pt, clients, policies, ptCards, ptTesting, ptReady,
@@ -2859,7 +2945,7 @@ body = '''
       openRuleEditor, saveRule, toggleRule, deleteRule, validateKeywords,
       toggleAllRetry, batchRetry, singleRetry, batchDeleteRetry,
       deleteRetryOne, loadNonInstant,
-      refreshOffline, cancelOffline, clearCancelLogs, loadCancelLogs,
+      refreshOffline, cancelOffline, cancelAllWaiting, p115Busy, clearCancelLogs, loadCancelLogs,
       saveSettings, loadSettings, testCd2, testP115, fetchToken, loadEvents,
     };
   }

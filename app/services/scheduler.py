@@ -400,6 +400,8 @@ class GuardScheduler:
         )
         auto_cancel = get_setting_bool(settings, "p115.auto_cancel", True)
         page_size = max(10, get_setting_int(settings, "p115.task_page_size", 30))
+        max_pages = C.P115_MAX_PAGES
+        grace = C.P115_VANISH_GRACE_SEC
 
         if not self.p115.configured:
             self.stats["p115_last_ok"] = False
@@ -407,29 +409,19 @@ class GuardScheduler:
             return
 
         try:
-            # 先拉「进行中」的任务，再补充全部。
+            # 分两次拉：「进行中」（stat=12，115 服务端分类）+「全部」。
             #
-            # 为什么分两次：115 的「全部」列表按添加时间倒序，完成记录
-            # 会大量堆积（实测几百上千条），进行中的任务很容易被挤到
-            # 后面几页甚至翻不到。分两次拉能保证「下载中」的一定被看到
-            # —— 而超时清理恰恰只关心这部分。
-            running: list = []
-            try:
-                running = await self.p115.list_offline_tasks(
-                    page_size=page_size, stat=C.P115_STAT_RUNNING
-                )
-            except P115Error as exc:
-                logger.debug("拉取「进行中」任务失败（回退到全部）: %s", exc)
-
-            tasks = await self.p115.list_offline_tasks(page_size=page_size)
-
-            # 合并去重：以 info_hash 为键，进行中的优先保留
-            merged: dict[str, object] = {}
-            for t in tasks:
-                merged[t.info_hash] = t
-            for t in running:
-                merged[t.info_hash] = t
-            tasks = list(merged.values())
+            # 为什么不能只用「全部」：115 的「全部」列表会把历史记录一并
+            # 返回（实测几百上千条），其中大量已完成/已取消的老任务
+            # percentDone 缺失或为 0，仅按进度判断会把它们全算成「下载中」。
+            # 实测曾出现界面显示 25 个「正在下载」而网盘实际只有 4 个。
+            #
+            # stat=12 是 115 服务端自己的「正在下载」分类，与网页端同源，
+            # 以它为准。
+            snapshot = await self.p115.collect_offline_snapshot(
+                page_size=page_size, max_pages=max_pages
+            )
+            tasks = snapshot.tasks
         except P115AuthExpired as exc:
             self.stats["p115_last_ok"] = False
             self.stats["p115_last_error"] = str(exc)
@@ -444,15 +436,30 @@ class GuardScheduler:
         self.stats["p115_last_ok"] = True
         self.stats["p115_last_error"] = ""
         self.stats["p115_tasks_seen"] = len(tasks)
+        self.stats["p115_running_seen"] = snapshot.running_count
+        self.stats["p115_running_ok"] = snapshot.running_ok
 
         # ---- 更新快照 ----
         with session_scope() as session:
-            self._sync_offline_snapshots(session, tasks, now, threshold)
+            self._sync_offline_snapshots(
+                session,
+                tasks,
+                now,
+                threshold,
+                complete=snapshot.complete,
+                grace=grace,
+            )
 
         # ---- 筛选超时任务 ----
+        #
+        # 只自动取消「服务端确认在下载」的任务。
+        #
+        # 为什么不连带 waiting：waiting 是「还在 115 列表里但服务端没把它
+        # 算作正在下载」的任务，其中可能混着历史记录。对它们批量取消会
+        # 误删历史，因此改为在界面上列出、由用户按需一键清理。
         expired = [
             t for t in tasks
-            if not t.is_terminal and t.age_seconds(now) > threshold
+            if t.is_running and t.age_seconds(now) > threshold
         ]
         if not expired:
             return
@@ -500,6 +507,8 @@ class GuardScheduler:
         tasks: list[OfflineTask],
         now: float,
         threshold: int,
+        complete: bool = True,
+        grace: int = 3600,
     ) -> None:
         """把 115 列表同步到本地快照表。"""
         existing = {
@@ -539,15 +548,28 @@ class GuardScheduler:
                 row.last_seen_at = now
 
         # 列表里消失的任务标记 removed
+        #
+        # 只在「全部」列表完整翻完时才敢判定任务消失：翻页上限之外的
+        # 任务只是本次没被看到，不是真的不存在，误判会让正常任务被标成
+        # 已移除、超时监控随之失效。
+        if not complete:
+            logger.debug("「全部」列表未翻完，跳过消失判定")
+            return
+
         for info_hash, row in existing.items():
             if info_hash in seen:
                 continue
+            # 已经是终态的记录不再改动：完成/失败是历史事实，115 的历史
+            # 列表滚掉之后不该把它们改写成「已移除」，否则「已完成」会
+            # 逐渐变空、用户失去对账依据。
             if row.normalized_status in (
                 C.P115_ST_CANCELLED,
                 C.P115_ST_REMOVED,
+                C.P115_ST_FINISHED,
+                C.P115_ST_FAILED,
             ):
                 continue
-            if now - row.last_seen_at > 3600:
+            if now - row.last_seen_at > grace:
                 row.normalized_status = C.P115_ST_REMOVED
 
     def _write_cancel_log(

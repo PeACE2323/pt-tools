@@ -59,36 +59,52 @@ def list_offline(session: Session = Depends(db_session)) -> list[OfflineTaskOut]
 
 @router.get(
     "/debug/offline-raw",
-    summary="诊断：查看 115 云下载的原始状态码与进度",
+    summary="诊断：查看 115 云下载的原始状态码、进度与服务端归类",
 )
 async def debug_offline_raw(
     p115=Depends(p115_client),
 ) -> dict[str, object]:
     """拉取一次 115 任务列表，返回原始字段。
 
-    排查「下载中的任务显示成已完成」时用：这里同时给出 115 返回的
-    原始 ``status`` 与 ``percentDone``，以及本系统归一化后的结果，
-    能直接看出是哪一步判断错了。
+    排查「下载中的任务数量与网盘不一致」时用：这里同时给出 115 返回的
+    原始 ``status`` / ``percentDone``、服务端归类（``stat=12`` 是否命中）
+    与本地归一化结果，能直接看出是哪一步判断错了。
+
+    ``buckets`` 是各状态的任务数，正常情况下应与 115 网页端各分组一致。
     """
     try:
-        tasks = await p115.list_offline_tasks(page_size=50)
+        snap = await p115.collect_offline_snapshot(page_size=100, max_pages=30)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc), "tasks": []}
 
+    buckets: dict[str, int] = {}
     items = []
-    for t in tasks[:50]:
+    for t in snap.tasks:
+        status = t.normalized_status
+        buckets[status] = buckets.get(status, 0) + 1
         items.append(
             {
                 "name": t.name,
                 "info_hash": t.info_hash,
                 "raw_status": t.status,
                 "percent_done": round(t.percent_done, 2),
-                "normalized": t.normalized_status,
+                "server_bucket": t.stat_bucket or "(未归类)",
+                "normalized": status,
                 "is_terminal": t.is_terminal,
+                "is_running": t.is_running,
                 "add_time": t.add_time,
             }
         )
-    return {"ok": True, "count": len(tasks), "tasks": items}
+
+    return {
+        "ok": True,
+        "count": len(snap.tasks),
+        "running_count": snap.running_count,
+        "running_ok": snap.running_ok,
+        "complete": snap.complete,
+        "buckets": buckets,
+        "tasks": items[:100],
+    }
 
 
 @router.post(
